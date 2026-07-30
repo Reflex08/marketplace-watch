@@ -2,7 +2,9 @@ name: marketplace-watch
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # Hourly, not every 15 min: 10 brand queries cost 10 credits a run, and new
+    # Sur-Ron-class listings appear a few times a week, not a few times an hour.
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -27,12 +29,12 @@ jobs:
           SCRAPECREATORS_KEY: ${{ secrets.SCRAPECREATORS_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
-          QUERY: ebike
+          QUERIES: "surron,talaria,e ride pro,79bike,rfn apollo,segway dirt bike,electric dirt bike,altis motors,rawrr,ventus"
           LAT: "43.7615"
           LNG: "-79.4111"
-          RADIUS_KM: "60"
-          MAX_PRICE: "1500"
-          PITCH: "Hey! Any interest in trading your e-bike for my go-kart? Runs great, can send pics and video of it going."
+          RADIUS_KM: "100"
+          MAX_PRICE: "15000"
+          PITCH: "Hey! Any interest in trading your bike for my go-kart? Runs great, can send pics and video of it going. Happy to add cash on top if needed."
       - name: persist seen state
         run: |
           git config user.name github-actions
