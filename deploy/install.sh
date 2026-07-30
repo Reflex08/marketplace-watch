@@ -10,6 +10,9 @@ set -euo pipefail
 
 REPO="https://github.com/Reflex08/marketplace-watch.git"
 DIR="/opt/marketplace-watch"
+# State is kept OUT of the checkout: this script does `git reset --hard` on redeploy,
+# which would otherwise replace live seen.json / rules.json with the committed copies.
+STATE_DIR="/var/lib/marketplace-watch"
 ENVFILE="/etc/marketplace-watch.env"
 USER_NAME="mwatch"
 
@@ -32,6 +35,14 @@ else
     git clone --quiet "$REPO" "$DIR"
 fi
 
+echo "== state dir =="
+mkdir -p "$STATE_DIR"
+# Seed from the repo's copies on first install only, so an existing droplet keeps its
+# history and its learned rules across redeploys.
+for f in seen.json pending.json rules.json state.json; do
+    [ -e "$STATE_DIR/$f" ] || cp "$DIR/$f" "$STATE_DIR/$f" 2>/dev/null || echo '{}' > "$STATE_DIR/$f"
+done
+
 echo "== venv =="
 [ -x "$DIR/.venv/bin/python" ] || python3 -m venv "$DIR/.venv"
 "$DIR/.venv/bin/pip" install --quiet --upgrade pip requests
@@ -47,12 +58,12 @@ SCRAPECREATORS_KEY=$1
 TG_TOKEN=$2
 TG_CHAT=$3
 ANTHROPIC_API_KEY=${4:-}
+STATE_DIR=$STATE_DIR
 EOF
 chmod 600 "$ENVFILE"
 
-# State files live on disk here; the droplet is the single source of truth once it
-# runs, so nothing is committed back to git.
-chown -R "$USER_NAME":"$USER_NAME" "$DIR"
+# The droplet is the single source of truth once it runs; nothing is committed back.
+chown -R "$USER_NAME":"$USER_NAME" "$DIR" "$STATE_DIR"
 
 echo "== systemd =="
 install -m 644 "$DIR/deploy/marketplace-listen.service" /etc/systemd/system/

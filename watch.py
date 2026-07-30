@@ -16,15 +16,19 @@ import requests
 
 SEARCH_API = "https://api.scrapecreators.com/v1/facebook/marketplace/search"
 ITEM_API = "https://api.scrapecreators.com/v1/facebook/marketplace/item"
-SEEN = pathlib.Path(__file__).with_name("seen.json")
+# State sits beside the script by default; STATE_DIR moves it out of the repo. On a
+# server that matters: `git reset --hard` during a redeploy would otherwise overwrite
+# seen.json and rules.json with the stale copies committed to git.
+_STATE_DIR = pathlib.Path(os.environ.get("STATE_DIR") or pathlib.Path(__file__).parent)
+SEEN = _STATE_DIR / "seen.json"
 # Vetted listings not yet alerted. Persisted because the cap defers more than it
 # sends, and a deferred listing found on page 3 won't reappear on tomorrow's page 1.
-PENDING = pathlib.Path(__file__).with_name("pending.json")
+PENDING = _STATE_DIR / "pending.json"
 # Written by `watch.py --feedback` from your Telegram replies. Overrides the env
 # defaults below, so every setting is adjustable by talking to the bot.
-RULES = pathlib.Path(__file__).with_name("rules.json")
+RULES = _STATE_DIR / "rules.json"
 # Telegram cursor + message_id -> listing, so a reply can be tied to its alert.
-STATE = pathlib.Path(__file__).with_name("state.json")
+STATE = _STATE_DIR / "state.json"
 
 
 def load_seen():

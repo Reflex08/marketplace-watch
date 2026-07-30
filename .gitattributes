@@ -1,0 +1,7 @@
+# Shell scripts and systemd units must be LF or Linux rejects them outright
+# ("bad interpreter: /usr/bin/env bash^M"). Do not leave this to client config.
+*.sh            text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+watch.py        text eol=lf
+*.yml           text eol=lf
