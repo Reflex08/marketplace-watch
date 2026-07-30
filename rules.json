@@ -4,5 +4,9 @@
   ],
   "exclude_add": [
     "racing bike"
-  ]
+  ],
+  "no_trade_add": [
+    "no trades"
+  ],
+  "radius_km": 200.0
 }

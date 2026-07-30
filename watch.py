@@ -689,13 +689,20 @@ RULE_TOOL = {
 
 def interpret(feedback, listing):
     """Turn a free-text reply into one filter change. Returns the tool input dict."""
+    # Read rules.json live, not the import-time snapshot. Processing several replies
+    # in one run otherwise shows the model stale numbers, and it answers "already set,
+    # no change" to an instruction that had not in fact been applied yet.
+    live = load_json(RULES, {})
+    blocked = live.get("brands_blocked", [])
     context = (
         f"Current settings:\n"
-        f"- searching for: {', '.join(QUERIES)}\n"
-        f"- price range: CA${MIN_PRICE:g} to CA${MAX_PRICE:g}\n"
-        f"- radius: {RADIUS_KM:g} km from North York, Toronto\n"
-        f"- counts as new: listed within {NEW_HOURS:g} hours\n"
-        f"- max alerts per run: {MAX_ALERTS}\n"
+        f"- searching for: {', '.join(q for q in QUERIES if q not in blocked)}\n"
+        f"- price range: CA${live.get('min_price', MIN_PRICE):g} to "
+        f"CA${live.get('max_price', MAX_PRICE):g}\n"
+        f"- radius: {live.get('radius_km', RADIUS_KM):g} km from North York, Toronto\n"
+        f"- counts as new: listed within {live.get('new_hours', NEW_HOURS):g} hours\n"
+        f"- max alerts per run: {live.get('max_alerts', MAX_ALERTS):g}\n"
+        + (f"- already blocked: {', '.join(blocked)}\n" if blocked else "")
     )
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -797,21 +804,27 @@ def apply_rule(rule):
     return f"{action} = {value}"
 
 
-def feedback():
-    """Read Telegram replies, convert each to a filter change, confirm back."""
+def feedback(wait=0):
+    """Read Telegram replies, convert each to a filter change, confirm back.
+
+    wait>0 uses Telegram long polling: the request stays open until a message
+    arrives, so replies are handled instantly and an idle bot makes almost no
+    requests. wait=0 is a single non-blocking check, for the cron path.
+    """
     state = load_json(STATE, {})
-    params = {"timeout": 0, "allowed_updates": '["message"]'}
+    params = {"timeout": wait, "allowed_updates": '["message"]'}
     if state.get("tg_offset"):
         params["offset"] = state["tg_offset"]
     r = requests.get(
         f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/getUpdates",
-        params=params, timeout=45,
+        params=params, timeout=wait + 20,      # must outlast the server-side wait
     )
     r.raise_for_status()
     updates = r.json().get("result", [])
     if not updates:
-        print("no replies")
-        return
+        if not wait:
+            print("no replies")
+        return 0
 
     msgs = state.get("messages", {})
     applied = 0
@@ -841,6 +854,27 @@ def feedback():
 
     STATE.write_text(json.dumps(state))
     print(f"{len(updates)} update(s), {applied} rule(s) applied")
+    return len(updates)
+
+
+def listen(wait=50):
+    """Stay connected and answer replies the moment they arrive.
+
+    Long polling, so an idle hour is a handful of held-open requests rather than
+    thousands of empty ones — and Telegram's getUpdates is free either way. Only
+    the Claude call costs anything, and that only fires on an actual reply.
+    """
+    print(f"listening (long poll {wait}s) — Ctrl-C to stop", flush=True)
+    while True:
+        try:
+            feedback(wait=wait)
+        except KeyboardInterrupt:
+            print("stopped")
+            return
+        except Exception as exc:
+            # A dropped connection or a Telegram hiccup must not end the session.
+            print(f"listen error, retrying in 5s: {exc}", flush=True)
+            time.sleep(5)
 
 
 def show():
@@ -1387,6 +1421,8 @@ if __name__ == "__main__":
         show()
     elif "--feedback" in sys.argv:
         feedback()
+    elif "--listen" in sys.argv:
+        listen()
     else:
         try:
             main()
