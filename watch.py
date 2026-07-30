@@ -9,6 +9,7 @@ import os
 import pathlib
 import sys
 import time
+import zlib
 
 import requests
 
@@ -36,11 +37,32 @@ LAT = os.environ.get("LAT", "43.7615")   # North York, Toronto
 LNG = os.environ.get("LNG", "-79.4111")
 RADIUS_KM = os.environ.get("RADIUS_KM", "100")
 MAX_PRICE = os.environ.get("MAX_PRICE", "15000")   # Sur-Ron/Talaria class runs CA$3.5k-10k
-PITCH = os.environ.get(
-    "PITCH",
-    "Hey! Any interest in trading your e-bike for my go-kart? "
-    "Runs great, can send pics and video of it going.",
-)
+# Every seller gets a different message. Identical text sent to dozens of people is
+# exactly what Meta's spam detection looks for, so the pitch is composed from three
+# rotating parts — 4x4x4 = 64 combinations — keyed off the listing id. Same listing
+# always renders the same text, so a re-send is never a second, different message.
+PITCH_OPENERS = [
+    "Hey, is this still available?",
+    "Hi! Still got this?",
+    "Hey there, is this still for sale?",
+    "Hi, is this still up for grabs?",
+]
+PITCH_OFFERS = [
+    "I've got a go-kart I'd be open to trading for it.",
+    "Would you consider a trade for my go-kart?",
+    "Any chance you'd trade for a go-kart?",
+    "I have a go-kart I'm looking to trade.",
+]
+PITCH_CLOSERS = [
+    "Happy to send pics and a video of it running.",
+    "Can send pics and video if you're interested.",
+    "I can add some cash on top if that helps.",
+    "Let me know and I'll send photos over.",
+]
+# Set PITCH to force one fixed message instead (not recommended — see above).
+PITCH = os.environ.get("PITCH", "").strip()
+# Or set PITCHES to your own '|'-separated variants.
+PITCHES = [p.strip() for p in os.environ.get("PITCHES", "").split("|") if p.strip()]
 
 # Brand/model allowlist. The API keyword-matches loosely, so "ventus" returns golf
 # shafts and "rawrr" returns sweaters — an allowlist kills that permanently where a
@@ -107,7 +129,6 @@ TRADE_OK = [
     if p.strip()
 ]
 
-DESC_CHARS = int(os.environ.get("DESC_CHARS", "400"))
 SEND_DELAY = float(os.environ.get("SEND_DELAY", "1.2"))  # Telegram allows ~1 msg/sec per chat
 
 # Queries that run every single time, no matter the rotation — the brands worth
@@ -296,42 +317,51 @@ def trade_signal(*texts):
     return None, None
 
 
+def snippet(text, phrase, width=70):
+    """The matched phrase plus a little context, collapsed to one line."""
+    flat = " ".join((text or "").split())
+    i = flat.lower().find((phrase or "").lower())
+    if not phrase or i < 0:
+        return phrase or ""
+    pad = max(0, (width - len(phrase)) // 2)
+    start, end = max(0, i - pad), min(len(flat), i + len(phrase) + pad)
+    return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
+
+
+def pitch_for(listing_id):
+    """A stable per-listing message. crc32, not hash(), which is salted per process
+    and would send the same seller different text on a retry."""
+    if PITCH:
+        return PITCH
+    h = zlib.crc32(str(listing_id).encode())
+    if PITCHES:
+        return PITCHES[h % len(PITCHES)]
+    return " ".join([
+        PITCH_OPENERS[h % len(PITCH_OPENERS)],
+        PITCH_OFFERS[(h // 7) % len(PITCH_OFFERS)],
+        PITCH_CLOSERS[(h // 53) % len(PITCH_CLOSERS)],
+    ])
+
+
 def card(listing, info=None, hit=None):
+    """Three lines, four if the seller wants a trade. The pitch is the only
+    <code> element, so there is exactly one thing to tap and copy."""
     info = info or {}
     esc = lambda s: html.escape(str(s))
 
-    price = (listing.get("price") or {}).get("formatted_amount", "?")
-    was = (info.get("strikethrough_price") or {}).get("formattedAmountWithoutDecimals")
-    price_line = f"{esc(price)} <s>{esc(was)}</s>" if was else esc(price)
-
-    bits = [
-        info.get("location_text") or (listing.get("location") or {}).get("display_name"),
-        next(
-            (
-                a.get("label")
-                for a in info.get("attributes") or []
-                if a.get("attribute_name") == "Condition"
-            ),
-            None,
-        ),
-        info.get("listing_date_text"),
-    ]
-    meta = " · ".join(esc(b) for b in bits if b)
-
-    desc = (info.get("description") or "").strip()
-    if len(desc) > DESC_CHARS:
-        desc = desc[:DESC_CHARS].rstrip() + "…"
+    head = f"<b>{esc(listing.get('title') or '(no title)')}</b>"
+    head += f" — {esc((listing.get('price') or {}).get('formatted_amount', '?'))}"
+    where = info.get("location_text") or (listing.get("location") or {}).get("display_name")
+    if where:
+        head += f" · {esc(where)}"
 
     lines = []
     if hit:
-        lines.append(f"🔥 <b>OPEN TO TRADES</b> — said {esc(hit)!s}")
-    lines.append(f"<b>{esc(listing.get('title') or '(no title)')}</b> — {price_line}")
-    if meta:
-        lines.append(meta)
+        why = snippet(info.get("description") or listing.get("title"), hit)
+        lines.append(f"⚡ <b>WANTS TRADE</b> · <i>{esc(why)}</i>")
+    lines.append(head)
     lines.append(esc(listing.get("url") or ""))
-    if desc:
-        lines.append(f"\n{esc(desc)}")
-    lines.append(f"\n<code>{esc(PITCH)}</code>")
+    lines.append(f"<code>{esc(pitch_for(listing.get('id')))}</code>")
     return "\n".join(lines)
 
 
@@ -538,27 +568,48 @@ def selftest():
     assert rejected("Marvel Legends Mantis action figure") == "not a known model"
     assert rejected("Mens hoodie size 3XL") == "not a known model"
 
-    hot = card(fresh[2], details["y"], "trades welcome")
-    assert hot.startswith("🔥") and "OPEN TO TRADES" in hot
-    assert "<code>" in hot and "CA$6,099" in hot
-
-    full = card(
-        {"title": "Bike & Trailer <used>", "price": {"formatted_amount": "CA$350"}, "url": "u"},
-        {
-            "description": "throttle doesn't work",
-            "location_text": "Vaughan, ON",
-            "listing_date_text": "Listed 3 weeks ago",
-            "strikethrough_price": {"formattedAmountWithoutDecimals": "CA$400"},
-            "attributes": [{"attribute_name": "Condition", "label": "Used - Good"}],
-        },
+    # trade card: 4 lines, tag carries the quote that triggered it
+    hot = card(
+        fresh[2],
+        {"description": "Selling my Light Bee. Trades welcome, prefer a dirt bike or quad.",
+         "location_text": "Vaughan, ON"},
+        "trades welcome",
     )
-    assert "&amp;" in full and "&lt;used&gt;" in full          # escaped, not raw HTML
-    assert "<s>CA$400</s>" in full
-    assert "Vaughan, ON · Used - Good · Listed 3 weeks ago" in full
-    assert not full.startswith("🔥")
+    assert hot.count("\n") == 3, hot
+    assert hot.startswith("⚡") and "WANTS TRADE" in hot
+    assert "Trades welcome, prefer a dirt bike" in hot          # the reasoning, in context
+    assert hot.count("<code>") == 1                             # exactly one thing to copy
+    assert "CA$6,099" in hot and "Vaughan, ON" in hot
 
-    assert "…" in card({"title": "t"}, {"description": "x" * (DESC_CHARS + 50)})
+    # plain card: 3 lines, no tag, no description dump
+    plain = card(
+        {"title": "Bike & Trailer <used>", "price": {"formatted_amount": "CA$350"}, "url": "u"},
+        {"description": "x" * 900, "location_text": "Barrie, ON"},
+    )
+    assert plain.count("\n") == 2, plain
+    assert "&amp;" in plain and "&lt;used&gt;" in plain         # escaped, not raw HTML
+    assert not plain.startswith("⚡") and "WANTS TRADE" not in plain
+    assert "xxx" not in plain                                   # description body is gone
+    assert len(plain) < 400, len(plain)
+
     assert "<b>" in card({})                                   # survives an empty listing
+    # snippet trims around the match and marks the elisions
+    long_desc = "a" * 200 + " open to trades " + "b" * 200
+    assert snippet(long_desc, "open to trades").startswith("…")
+    assert snippet(long_desc, "open to trades").endswith("…")
+    assert "open to trades" in snippet(long_desc, "open to trades")
+    assert snippet("no match here", "trade") == "trade"
+    assert snippet(None, None) == ""
+
+    # pitch varies per listing, but is stable for a given listing across runs
+    ids = [str(1_000_000 + i) for i in range(80)]
+    texts = [pitch_for(i) for i in ids]
+    assert texts == [pitch_for(i) for i in ids]                 # deterministic, not random
+    assert len(set(texts)) >= 20, len(set(texts))               # genuinely varied over 80
+    worst = max(texts.count(t) for t in set(texts))
+    assert worst <= 8, worst                                    # no one wording dominates
+    assert all("go-kart" in t for t in texts)                   # the actual offer survives
+    assert len(set(pitch_for(i) for i in ids)) > 1
 
     retry_policy_check()
 

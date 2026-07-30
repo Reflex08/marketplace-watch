@@ -24,7 +24,34 @@ the scraping happens on ScrapeCreators' infrastructure, so your account is never
    waiting longer.
 4. **Read the description** for that batch only (1 credit each) to judge trade intent.
 5. **Drop refusers**, then **rank** — sellers saying "trades welcome", "swap", "trade for"
-   (`TRADE_OK`) are flagged 🔥 and sent first.
+   (`TRADE_OK`) are tagged `⚡ WANTS TRADE` with the quote that triggered it, and sent first.
+
+## The alert
+
+Three lines, four if the seller wants a trade. Nothing else — no description dump, no condition,
+no listing date, because the point is to glance and act.
+
+```
+⚡ WANTS TRADE · …Open to trades, prefer a go kart or quad. …
+2024 Sur-Ron Ultra Bee — CA$7,500 · Vaughan, ON
+https://www.facebook.com/marketplace/item/…
+Hey there, is this still for sale? Would you consider a trade for my go-kart? …
+```
+
+The last line is the only `<code>` element in the message, so there is exactly one thing to tap
+and copy.
+
+**Every seller gets different wording.** The pitch is composed from three rotating parts —
+4 openers × 4 offers × 4 closers = 64 combinations — keyed off the listing id via crc32. Identical
+text sent to dozens of people is precisely what Meta's spam detection looks for. Keying off the id
+rather than randomising means the same listing always renders the same text, so a re-send is never a
+second, differently-worded message to the same person.
+
+Setting `PITCH` forces one fixed message to everyone. Don't, unless you know why you want that.
+`PITCHES` takes your own `|`-separated variants if you'd rather write them yourself.
+
+Variation is not a licence to blast: sending eighty messages by hand in one evening will flag your
+account whatever the wording. Spread them out.
 
 Two deliberate asymmetries:
 

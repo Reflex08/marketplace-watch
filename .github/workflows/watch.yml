@@ -39,7 +39,9 @@ jobs:
           PAGES_PER_QUERY: "1"
           DATE_LISTED: "all"
           MAX_ALERTS: "6"
-          PITCH: "Hey! Any interest in trading your bike for my go-kart? Runs great, can send pics and video of it going. Happy to add cash on top if needed."
+          # PITCH is deliberately unset: leaving it blank lets watch.py compose a
+          # different message per listing. Setting it forces one identical text to
+          # every seller, which is the pattern Meta flags as spam.
       - name: persist state
         if: always()
         run: |
