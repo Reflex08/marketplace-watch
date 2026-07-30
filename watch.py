@@ -789,8 +789,20 @@ def apply_rule(rule):
     if action in lists:
         key = lists[action]
         bucket = data.setdefault(key, [])
-        if value.lower() in [str(x).lower() for x in bucket]:
-            return None                       # already set, don't churn the file
+        # Compare against what is actually in force, not just this file. The defaults
+        # already contain "no trades", and a reply of "I prefer trades" was writing it
+        # again as a no-op rule.
+        active = {
+            "exclude_add": EXCLUDE,
+            "dealer_add": DEALER,
+            "no_trade_add": NO_TRADE,
+            "brands_added": REQUIRE,
+            "brands_blocked": [],
+        }[key]
+        already = {str(x).lower() for x in bucket} | {str(x).lower() for x in active}
+        if value.lower() in already:
+            print(f"{action}={value!r} already in effect, nothing to change")
+            return None
         bucket.append(value.lower())
     elif action in numbers:
         try:
@@ -1258,6 +1270,11 @@ def rules_check():
             assert apply_rule({"action": "mark_no_trade", "value": bad}) is None, bad
         # genuine commercial phrases still go through
         assert apply_rule({"action": "mark_dealer", "value": "trade-in special"}) is not None
+        # but a phrase already in force is a no-op, not a duplicate rule. "Good, but I
+        # prefer trades" was writing mark_no_trade="no trades", which is a default.
+        assert apply_rule({"action": "mark_no_trade", "value": "no trades"}) is None
+        assert apply_rule({"action": "mark_dealer", "value": "financing"}) is None
+        assert apply_rule({"action": "block_word", "value": "scooter"}) is None
         # and deliberately dropping a brand is still allowed, via block_brand
         assert apply_rule({"action": "block_brand", "value": "talaria"}) is not None
 
