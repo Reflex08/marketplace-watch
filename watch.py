@@ -129,6 +129,9 @@ EXCLUDE = [
         "2 stroke,4 stroke,two stroke,four stroke,gas powered,gasoline,petrol,"
         "yamaha,honda,kawasaki,suzuki,ktm,husqvarna,gas dirt,pit pro,"
         # scooters and commuters that keep turning up under dirt-bike phrasing
+        # budget makes the owner has ruled out; they arrive via generic "electric dirt
+        # bike" phrasing rather than their brand name, so REQUIRE alone misses them
+        "yozma,"
         "scooter,e-scooter,escooter,moped,fat tire,fat bike,pedal assist,mountain bike,"
         # street/sport bikes keep arriving under electric-moto phrasing
         "sport bike,sportbike,street bike,streetbike,sportster,cruiser,ninja",
