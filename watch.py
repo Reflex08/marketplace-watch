@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 import requests
 
@@ -42,10 +43,21 @@ REQUIRE = [
     w.strip().lower()
     for w in os.environ.get(
         "REQUIRE",
-        "surron,sur-ron,sur ron,talaria,e ride pro,eride pro,e-ride pro,altis,rawrr,"
-        "79bike,79 bike,ventus,rfn,apollo,segway,light bee,ultra bee,storm bee,lbx,"
-        "sting,falcon,electric dirt bike,e dirt bike,electric motocross,emx,"
-        "electric enduro,dirt ebike,dirt e-bike",
+        # the brands you named
+        "surron,sur-ron,sur ron,talaria,e ride pro,eride pro,e-ride pro,eride,"
+        "altis,rawrr,79bike,79 bike,ventus,rfn,apollo,segway,"
+        # their models
+        "light bee,lightbee,ultra bee,storm bee,lbx,sting,mantis,mx3,mx4,mx5,"
+        "x3,3x,falcon,warthog,xxx,"
+        # other electric dirt bike makes that show up on Marketplace
+        "kuberg,onyx,volcon,stark varg,delfast,dust moto,kalk,razor mx,ridstar,"
+        "valtinsu,gt54,gt73,gt7,emmo,rooder,evoque,arctic leopard,sozo,m2s,zoombike,"
+        "electric motion,bultaco,flux,phatmoto,venom,ebroh,nitro,tromox,"
+        "strike,shadow sx,heybike,villain,yozma,kukirin,weped,emoto,e-moto,e moto,"
+        # generic phrasing, for makes not listed above
+        "electric dirt bike,electric dirtbike,e dirt bike,edirt,dirt ebike,"
+        "dirt e-bike,electric motocross,electric enduro,electric pit bike,"
+        "emx,electric moto,ebike dirt,e-bike dirt,dirt bike,dirtbike,pit bike",
     ).split(",")
     if w.strip()
 ]
@@ -88,6 +100,7 @@ TRADE_OK = [
 ]
 
 DESC_CHARS = int(os.environ.get("DESC_CHARS", "400"))
+SEND_DELAY = float(os.environ.get("SEND_DELAY", "1.2"))  # Telegram allows ~1 msg/sec per chat
 
 
 def call(url, params):
@@ -224,27 +237,41 @@ def card(listing, info=None, hit=None):
     return "\n".join(lines)
 
 
-def notify(text):
-    r = requests.post(
-        f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage",
-        json={"chat_id": os.environ["TG_CHAT"], "text": text, "parse_mode": "HTML"},
-        timeout=30,
-    )
-    r.raise_for_status()
+def notify(text, tries=4):
+    """Telegram caps sustained sends to one chat at roughly 1/sec, so honour 429s."""
+    for attempt in range(tries):
+        r = requests.post(
+            f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage",
+            json={"chat_id": os.environ["TG_CHAT"], "text": text, "parse_mode": "HTML"},
+            timeout=30,
+        )
+        if r.status_code == 429:
+            try:
+                wait = int(r.json()["parameters"]["retry_after"])
+            except (ValueError, KeyError, TypeError):
+                wait = 5 * (attempt + 1)
+            print(f"telegram rate limited, waiting {wait}s")
+            time.sleep(wait + 1)
+            continue
+        r.raise_for_status()
+        return
+    raise RuntimeError("telegram rate limited on every attempt")
 
 
 def new_ids(listings, seen):
-    out = []
+    """Listings not in seen, deduped. Pure: seen is only updated once a send succeeds."""
+    out, batch = [], set()
     for listing in listings:
         lid = str(listing.get("id") or "")
-        if lid and lid not in seen:
+        if lid and lid not in seen and lid not in batch:
+            batch.add(lid)
             out.append(listing)
-            seen.add(lid)
     return out
 
 
-def triage(fresh, get_detail=detail):
+def triage(fresh, get_detail=None):
     """(sorted alerts, skip log). Trade-friendly first; explicit refusers dropped."""
+    get_detail = get_detail or detail   # resolved here, not at def time, so it's swappable
     alerts, skips = [], []
     for listing in fresh:
         title = listing.get("title")
@@ -262,26 +289,40 @@ def triage(fresh, get_detail=detail):
     return alerts, skips
 
 
+def save(seen):
+    SEEN.write_text(json.dumps(sorted(seen)))
+
+
 def main():
     first_run = not SEEN.exists()
     seen = set() if first_run else set(json.loads(SEEN.read_text()))
 
     fresh = new_ids(search(), seen)
-    # Written before alerting: a crash mid-send costs one alert, not a repeat of all of them.
-    SEEN.write_text(json.dumps(sorted(seen)))
 
     if first_run:
         # ponytail: seed silently so run #1 doesn't dump every standing listing at you
+        save(seen | {str(l["id"]) for l in fresh})
         print(f"seeded {len(fresh)} existing listings, no alerts sent")
         return
 
     alerts, skips = triage(fresh)
     for listing, why in skips:
         print(f"skip {listing['id']} ({why}): {listing.get('title')}")
-    for _, listing, info, hit in alerts:
-        notify(card(listing, info, hit))
-    hot = sum(1 for a in alerts if a[0])
-    print(f"{len(fresh)} new, {len(alerts)} sent ({hot} trade-friendly), {len(skips)} skipped")
+        seen.add(str(listing["id"]))
+
+    sent = hot = 0
+    try:
+        for is_hot, listing, info, hit in alerts:
+            notify(card(listing, info, hit))
+            # Recorded only after the send lands, so a rate-limit crash re-alerts the
+            # stragglers next run instead of burying them as already-seen.
+            seen.add(str(listing["id"]))
+            sent += 1
+            hot += bool(is_hot)
+            time.sleep(SEND_DELAY)
+    finally:
+        save(seen)
+    print(f"{len(fresh)} new, {sent} sent ({hot} trade-friendly), {len(skips)} skipped")
 
 
 def selftest():
@@ -291,8 +332,9 @@ def selftest():
     assert pick_listings("nope") == []
 
     seen = {"1"}
+    # "2" and 2 are the same listing; seen must not be mutated here
     assert [l["id"] for l in new_ids([{"id": "1"}, {"id": "2"}, {"id": 2}, {}], seen)] == ["2"]
-    assert seen == {"1", "2"}
+    assert seen == {"1"}
 
     # allowlist keeps the real models, drops the search pollution
     assert rejected("2024 Sur-Ron Ultra Bee") is None
@@ -306,6 +348,12 @@ def selftest():
     assert rejected("Key switch for surron and mx3") == "part:key switch"
     assert rejected("Talaria and surron parts") == "part:parts"
     assert rejected("Jetson ebike") == "not a known model"       # commuter e-bike, not wanted
+    assert rejected("Ron White sneakers") == "not a known model"  # the 'rawrr' query returns these
+    # real bikes the first, narrower allowlist was throwing away
+    assert rejected("2025 Strike Shadow SX 60V") is None
+    assert rejected("HeyBike Villain TRADE") is None
+    assert rejected("Gt73Pro *MODDED* (check description)") is None
+    assert rejected("Dirt Bikes Available Yozma heybike jasion") is None
     assert rejected(None) == "not a known model"
 
     # negatives must beat positives: these all contain the word "trade"
@@ -350,7 +398,44 @@ def selftest():
 
     assert "…" in card({"title": "t"}, {"description": "x" * (DESC_CHARS + 50)})
     assert "<b>" in card({})                                   # survives an empty listing
+
+    crash_safety_check()
     print("ok")
+
+
+def crash_safety_check():
+    """A send that fails must leave that listing unseen, so the next run retries it."""
+    import tempfile
+
+    global SEEN, SEND_DELAY
+    keep = (SEEN, SEND_DELAY, globals()["search"], globals()["detail"], globals()["notify"])
+    try:
+        SEEN = pathlib.Path(tempfile.mkdtemp()) / "seen.json"
+        SEEN.write_text("[]")          # exists, so not a seeding run
+        SEND_DELAY = 0
+        globals()["search"] = lambda: [
+            {"id": "a", "title": "Surron Light Bee X"},
+            {"id": "b", "title": "Talaria Sting"},
+        ]
+        globals()["detail"] = lambda _id: {}
+
+        sends = []
+
+        def flaky(text, tries=4):
+            sends.append(text)
+            if len(sends) == 2:
+                raise RuntimeError("telegram down")
+
+        globals()["notify"] = flaky
+        try:
+            main()
+        except RuntimeError:
+            pass
+        saved = set(json.loads(SEEN.read_text()))
+        assert saved == {"a"}, saved    # "b" never sent, so it must not be recorded
+    finally:
+        SEEN, SEND_DELAY = keep[0], keep[1]
+        globals()["search"], globals()["detail"], globals()["notify"] = keep[2], keep[3], keep[4]
 
 
 if __name__ == "__main__":
