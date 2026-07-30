@@ -29,16 +29,20 @@ jobs:
           SCRAPECREATORS_KEY: ${{ secrets.SCRAPECREATORS_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
-          QUERIES: "surron,talaria,e ride pro,79bike,rfn apollo,segway dirt bike,electric dirt bike,altis motors,rawrr,ventus"
+          # altis motors / rawrr / ventus omitted on purpose — they return sneakers,
+          # hockey cards and golf shafts. The brands stay in REQUIRE regardless.
+          QUERIES: "surron,talaria,e ride pro,79bike,rfn apollo,segway dirt bike,electric dirt bike"
           LAT: "43.7615"
           LNG: "-79.4111"
-          RADIUS_KM: "100"
+          RADIUS_KM: "200"
           MAX_PRICE: "15000"
           PRIORITY_QUERIES: "surron,talaria"
           QUERIES_PER_RUN: "5"
           PAGES_PER_QUERY: "1"
           DATE_LISTED: "all"
-          MAX_ALERTS: "6"
+          NEW_HOURS: "48"
+          MAX_CHECKS: "8"
+          MAX_ALERTS: "8"
           # PITCH is deliberately unset: leaving it blank lets watch.py compose a
           # different message per listing. Setting it forces one identical text to
           # every seller, which is the pattern Meta flags as spam.

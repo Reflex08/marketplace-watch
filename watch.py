@@ -3,10 +3,12 @@
 Ranking, not just filtering: sellers who say they'll trade go out first and flagged,
 sellers who say cash-only or no-trades are dropped entirely.
 """
+import datetime
 import html
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 import zlib
@@ -35,7 +37,7 @@ QUERIES = [
 ]
 LAT = os.environ.get("LAT", "43.7615")   # North York, Toronto
 LNG = os.environ.get("LNG", "-79.4111")
-RADIUS_KM = os.environ.get("RADIUS_KM", "100")
+RADIUS_KM = os.environ.get("RADIUS_KM", "200")
 MAX_PRICE = os.environ.get("MAX_PRICE", "15000")   # Sur-Ron/Talaria class runs CA$3.5k-10k
 # Every seller gets a different message. Identical text sent to dozens of people is
 # exactly what Meta's spam detection looks for, so the pitch is composed from three
@@ -118,6 +120,21 @@ NO_TRADE = [
     if p.strip()
 ]
 
+# Commercial sellers. Hard skip, checked before the trade rules — a dealer that takes
+# trade-ins is still a dealer. Title and description both, since they advertise in both.
+DEALER = [
+    p.strip().lower()
+    for p in os.environ.get(
+        "DEALER",
+        "financing,finance available,no credit check,lease to own,plus tax,plus taxes,"
+        "+tax,+ tax,plus hst,hst extra,taxes extra,tax included,in stock,we carry,"
+        "call us,text us for,visit us,our showroom,showroom,dealer,dealership,omvic,"
+        "msrp,extended warranty,demo model,demonstration model,wholesale,distributor,"
+        "authorized,delivery available,financing available,shop now,other models",
+    ).split(",")
+    if p.strip()
+]
+
 # Seller has invited a trade — send these first.
 TRADE_OK = [
     p.strip().lower()
@@ -145,9 +162,17 @@ PRIORITY_QUERIES = [
 # a few times a week. 0 means run everything every time.
 QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "5"))
 
-# Alerts per run. Caps the detail spend and, more importantly, means the standing
-# inventory arrives as a trickle rather than 50 messages at once. Overflow is not
-# dropped — it stays unseen and comes on later runs, newest and trade-friendly first.
+# Send a listing if it is NEW or if it MENTIONS A TRADE. Never if it refuses trades —
+# that check runs first and wins outright. "New" is read from the detail call's
+# creation_time, which we are paying for anyway to apply the refusal rule.
+NEW_HOURS = float(os.environ.get("NEW_HOURS", "48"))
+
+# Descriptions read per run, 1 credit each. This is the real spend knob: trade intent
+# only lives in the description, so a listing has to be read to be judged. Separate
+# from MAX_ALERTS because under TRADE_ONLY most reads end in a discard.
+MAX_CHECKS = int(os.environ.get("MAX_CHECKS", "8"))
+
+# Hard cap on messages per run, so a lucky batch can't dump ten at once.
 MAX_ALERTS = int(os.environ.get("MAX_ALERTS", "6"))
 
 # Pages to read per query, 1 credit each. Page 1 is the newest listings, so 1 is
@@ -302,6 +327,12 @@ def rejected(title):
     return None
 
 
+def dealer_signal(*texts):
+    """The commercial phrase that marks this as a dealer listing, or None."""
+    blob = " ".join(t for t in texts if t).lower()
+    return next((p for p in DEALER if p in blob), None)
+
+
 def trade_signal(*texts):
     """('no'|'yes'|None, matched phrase) — read from title AND description.
 
@@ -316,6 +347,34 @@ def trade_signal(*texts):
         if phrase in blob:
             return "yes", phrase
     return None, None
+
+
+_UNITS = {"minute": 1 / 60, "hour": 1, "day": 24, "week": 168, "month": 730, "year": 8760}
+
+
+def age_hours(info, now=None):
+    """How long ago this was listed, or None if the API didn't say.
+
+    Prefers creation_time (exact). Falls back to parsing "Listed 3 weeks ago",
+    which is all some listings carry.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    stamp = (info or {}).get("creation_time")
+    if stamp:
+        try:
+            when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            return (now - when).total_seconds() / 3600
+        except ValueError:
+            pass
+    text = ((info or {}).get("listing_date_text") or "").lower()
+    m = re.search(r"(\d+)\s*(minute|hour|day|week|month|year)", text)
+    if m:
+        return int(m.group(1)) * _UNITS[m.group(2)]
+    if "just now" in text or "moments ago" in text:
+        return 0.0
+    return None
 
 
 def snippet(text, phrase, width=70):
@@ -344,9 +403,9 @@ def pitch_for(listing_id):
     ])
 
 
-def card(listing, info=None, hit=None):
-    """Three lines, four if the seller wants a trade. The pitch is the only
-    <code> element, so there is exactly one thing to tap and copy."""
+def card(listing, info=None, hit=None, fresh=False):
+    """Three lines, plus a tag line when the seller wants a trade or the post is new.
+    The pitch is the only <code> element, so there is exactly one thing to tap."""
     info = info or {}
     esc = lambda s: html.escape(str(s))
 
@@ -356,10 +415,17 @@ def card(listing, info=None, hit=None):
     if where:
         head += f" · {esc(where)}"
 
-    lines = []
+    tags = []
     if hit:
-        why = snippet(info.get("description") or listing.get("title"), hit)
-        lines.append(f"⚡ <b>WANTS TRADE</b> · <i>{esc(why)}</i>")
+        tags.append(f"⚡ <b>WANTS TRADE</b> · <i>{esc(snippet(info.get('description') or listing.get('title'), hit))}</i>")
+    if fresh:
+        when = info.get("listing_date_text")
+        age = age_hours(info)
+        if not when and age is not None:
+            when = f"listed {age:.0f}h ago" if age < 48 else f"listed {age / 24:.0f}d ago"
+        tags.append("🆕 <b>NEW</b>" + (f" · {esc(when)}" if when else ""))
+
+    lines = tags
     lines.append(head)
     lines.append(esc(listing.get("url") or ""))
     lines.append(f"<code>{esc(pitch_for(listing.get('id')))}</code>")
@@ -416,6 +482,10 @@ def shortlist(fresh):
         if verdict == "no":
             skips.append((listing, f"refuses:{phrase}"))
             continue
+        shop = dealer_signal(title)
+        if shop:
+            skips.append((listing, f"dealer:{shop}"))
+            continue
         queue.append((verdict != "yes", listing))   # False sorts first
     queue.sort(key=lambda q: q[0])
     return [listing for _, listing in queue], skips
@@ -427,12 +497,27 @@ def triage(listings, get_detail=None):
     alerts, skips = [], []
     for listing in listings:
         info = get_detail(listing["id"])   # the one paid call per listing
-        verdict, phrase = trade_signal(listing.get("title"), info.get("description"))
+        title, desc = listing.get("title"), info.get("description")
+        verdict, phrase = trade_signal(title, desc)
         if verdict == "no":
+            # HARD RULE, checked first and unconditional.
             skips.append((listing, f"refuses:{phrase}"))
             continue
-        alerts.append((verdict == "yes", listing, info, phrase if verdict == "yes" else None))
-    alerts.sort(key=lambda a: not a[0])  # trade-friendly first
+        shop = dealer_signal(title, desc)
+        if shop:
+            # Also hard: a dealer that accepts trade-ins is still a dealer.
+            skips.append((listing, f"dealer:{shop}"))
+            continue
+        age = age_hours(info)
+        fresh = age is not None and age <= NEW_HOURS
+        wants = verdict == "yes"
+        if not (fresh or wants):
+            # Read, judged, discarded — but recorded, so the credit is never respent.
+            aged = "age unknown" if age is None else f"{age / 24:.0f}d old"
+            skips.append((listing, f"not new ({aged}), no trade mention"))
+            continue
+        alerts.append((wants, fresh, listing, info, phrase if wants else None))
+    alerts.sort(key=lambda a: (not a[0], not a[1]))   # trades first, then new
     return alerts, skips
 
 
@@ -461,46 +546,63 @@ def load_json(path, fallback):
 def main():
     seen = set(load_json(SEEN, []))
     # Already vetted on an earlier run; anything since alerted is dropped.
-    pending = [
-        l for l in load_json(PENDING, [])
-        if str(l.get("id") or "") and str(l["id"]) not in seen
-    ]
+    pending, dedupe = [], set()
+    for l in load_json(PENDING, []):
+        lid = str(l.get("id") or "")
+        if lid and lid not in seen and lid not in dedupe:
+            dedupe.add(lid)
+            pending.append(l)
     known = seen | {str(l["id"]) for l in pending}
 
-    fresh = [l for l in search() if str(l.get("id") or "") and str(l["id"]) not in known]
-    queue, skips = shortlist(fresh)
+    unseen = [l for l in search() if str(l.get("id") or "") and str(l["id"]) not in known]
+    queue, skips = shortlist(unseen)
 
     # Re-rank the whole backlog each run, so a bike that advertises a trade jumps
     # ahead of stock that has merely been waiting longer.
     pool = pending + queue
     pool.sort(key=lambda l: trade_signal(l.get("title"))[0] != "yes")
-    batch = pool[:MAX_ALERTS] if MAX_ALERTS > 0 else pool
+    batch = pool[:MAX_CHECKS] if MAX_CHECKS > 0 else pool
     held = pool[len(batch):]
 
     alerts, more_skips = triage(batch)
+    if MAX_ALERTS > 0 and len(alerts) > MAX_ALERTS:
+        # Spillover returns to the queue. It will be re-read next run, costing the
+        # credit again, so keep MAX_ALERTS >= MAX_CHECKS unless you want that.
+        held = [a[2] for a in alerts[MAX_ALERTS:]] + held
+        alerts = alerts[:MAX_ALERTS]
     for listing, why in skips + more_skips:
         print(f"skip {listing['id']} ({why}): {listing.get('title')}")
         seen.add(str(listing["id"]))
 
-    sent = hot = 0
+    sent = hot = new = 0
     try:
-        for is_hot, listing, info, hit in alerts:
-            notify(card(listing, info, hit))
+        for wants, fresh, listing, info, hit in alerts:
+            notify(card(listing, info, hit, fresh))
             # Recorded only after the send lands, so a rate-limit crash re-queues the
             # stragglers instead of burying them as already-seen.
             seen.add(str(listing["id"]))
             sent += 1
-            hot += bool(is_hot)
+            hot += bool(wants)
+            new += bool(fresh)
             time.sleep(SEND_DELAY)
     finally:
         SEEN.write_text(json.dumps(sorted(seen)))
         # Anything neither sent nor skipped goes back in the queue, including the
-        # tail of a batch that died mid-send.
-        leftover = [slim(l) for l in batch + held if str(l["id"]) not in seen]
+        # tail of a batch that died mid-send. Deduped by id: MAX_ALERTS spillover is
+        # still in `batch`, so a naive concat would queue it twice and both re-read
+        # and re-send it.
+        leftover, queued_ids = [], set()
+        for l in batch + held:
+            lid = str(l.get("id") or "")
+            if not lid or lid in seen or lid in queued_ids:
+                continue
+            queued_ids.add(lid)
+            leftover.append(slim(l))
         PENDING.write_text(json.dumps(leftover))
 
     print(
-        f"{len(fresh)} new, {sent} sent ({hot} trade-friendly), "
+        f"{len(unseen)} unseen, {len(batch)} read, {sent} sent "
+        f"({hot} want trades, {new} new), "
         f"{len(skips) + len(more_skips)} skipped, {len(leftover)} queued"
     )
 
@@ -574,11 +676,61 @@ def selftest():
     assert [l["id"] for l in queue] == ["t", "n", "y"], queue   # advertised trade first
     assert sorted(s[1].split(":")[0] for s in skips) == ["part", "refuses"]
 
-    # detail pass finds the trade offer that was only in the description
-    details = {"n": {}, "y": {"description": "trades welcome"}}
-    alerts, more = triage([fresh[0], fresh[2]], get_detail=lambda i: details.get(i, {}))
-    assert [a[1]["id"] for a in alerts] == ["y", "n"], alerts
-    assert more == []
+    # age parsing, from both sources
+    now = datetime.datetime(2026, 7, 30, 12, 0, tzinfo=datetime.timezone.utc)
+    assert age_hours({"creation_time": "2026-07-30T06:00:00.000Z"}, now) == 6.0
+    assert age_hours({"creation_time": "2026-07-28T12:00:00.000Z"}, now) == 48.0
+    assert age_hours({"listing_date_text": "Listed 3 weeks ago"}) == 504.0
+    assert age_hours({"listing_date_text": "Listed 2 hours ago"}) == 2.0
+    assert age_hours({"listing_date_text": "Listed just now"}) == 0.0
+    assert age_hours({"creation_time": "garbage", "listing_date_text": "Listed 1 day ago"}) == 24.0
+    assert age_hours({}) is None
+
+    # the OR rule: new alone qualifies, trade alone qualifies, neither does not,
+    # and a refusal beats both
+    recent = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    bikes = [
+        {"id": "new", "title": "Surron Light Bee X"},
+        {"id": "trade", "title": "Talaria Sting"},
+        {"id": "stale", "title": "79Bike Falcon"},
+        {"id": "both", "title": "Sur-Ron Ultra Bee"},
+        {"id": "refuse", "title": "Surron LBX"},
+    ]
+    details = {
+        "new": {"creation_time": recent, "description": "clean bike"},
+        "trade": {"listing_date_text": "Listed 5 weeks ago", "description": "open to trades"},
+        "stale": {"listing_date_text": "Listed 5 weeks ago", "description": "clean bike"},
+        "both": {"creation_time": recent, "description": "will trade for a quad"},
+        "refuse": {"creation_time": recent, "description": "no trades, cash only"},
+    }
+    alerts, more = triage(bikes, get_detail=lambda i: details[i])
+    assert [a[2]["id"] for a in alerts] == ["both", "trade", "new"], [a[2]["id"] for a in alerts]
+    assert [(a[0], a[1]) for a in alerts] == [(True, True), (True, False), (False, True)]
+    dropped = {l["id"]: why for l, why in more}
+    assert set(dropped) == {"stale", "refuse"}, dropped
+    assert dropped["refuse"].startswith("refuses:")      # hard rule, regardless of being new
+    assert "not new" in dropped["stale"]
+
+    # dealers are dropped even when new AND offering trade-ins
+    assert dealer_signal("Talaria X3", "Financing available, plus taxes") == "financing"
+    assert dealer_signal("79Bike Falcon GT - Demonstration Model NEW") == "demonstration model"
+    assert dealer_signal("Surron LBX, private sale, no rust") is None
+    shop_bikes = [{"id": "shop", "title": "Talaria Sting"}]
+    shop_alerts, shop_skips = triage(
+        shop_bikes,
+        get_detail=lambda i: {"creation_time": recent,
+                              "description": "Trade-ins welcome! Financing available, plus taxes."},
+    )
+    assert shop_alerts == [] and shop_skips[0][1] == "dealer:financing", (shop_alerts, shop_skips)
+    # and caught for free from the title alone, before any paid call
+    free_q, free_s = shortlist([{"id": "d", "title": "ELECTRIC DIRT BIKE SALE - financing available"}])
+    assert free_q == [] and free_s[0][1].startswith("dealer:"), (free_q, free_s)
+
+    # NEW tag renders and is distinct from the trade tag
+    only_new = card(bikes[0], details["new"], None, fresh=True)
+    assert only_new.startswith("🆕") and "WANTS TRADE" not in only_new
+    assert card(bikes[3], details["both"], "will trade", fresh=True).count("\n") == 4
 
     # the junk-query brands are gone from QUERIES but still recognised in REQUIRE
     assert "rawrr" not in QUERIES and rejected("Rawrr Mantis 2024") is None
@@ -686,7 +838,10 @@ class _sandbox:
         SEEN, PENDING = tmp / "seen.json", tmp / "pending.json"
         SEND_DELAY, MAX_ALERTS = 0, self.max_alerts
         globals()["search"] = lambda: self.listings
-        globals()["detail"] = lambda _id: {}
+        # Recent, so these qualify as NEW and actually reach the send path.
+        recent = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        globals()["detail"] = lambda _id: {"creation_time": recent}
         globals()["notify"] = self.notify_fn
         return self
 
@@ -714,11 +869,17 @@ def cap_defer_check():
         assert len(seen) == 1, seen
         assert len(pending) == 2, pending          # queued, not lost
         assert not (seen & pending)                # and never in both
+        raw = load_json(PENDING, [])
+        assert len(raw) == len({str(l["id"]) for l in raw}), raw   # no duplicates queued
 
         # next run sends the next one and re-queues the rest
         main()
         seen2, pending2 = box.state()
         assert len(seen2) == 2 and len(pending2) == 1, (seen2, pending2)
+        # and again, until the queue is empty — never growing
+        main()
+        seen3, pending3 = box.state()
+        assert len(seen3) == 3 and pending3 == set(), (seen3, pending3)
 
 
 def crash_safety_check():
