@@ -27,6 +27,28 @@ RULES = pathlib.Path(__file__).with_name("rules.json")
 STATE = pathlib.Path(__file__).with_name("state.json")
 
 
+def load_seen():
+    """id -> why it is settled ("sent", or the skip reason).
+
+    Was a flat list of ids, which made "have you sent me everything?" unanswerable:
+    a listing skipped as "no trade mention" under an older, narrower rule looked
+    identical to one already delivered. Legacy lists are migrated on read.
+    """
+    data = load_json(SEEN, {})
+    if isinstance(data, list):
+        return {str(i): "legacy" for i in data}
+    return {str(k): v for k, v in data.items()}
+
+
+def save_seen(seen):
+    SEEN.write_text(json.dumps(seen, sort_keys=True, indent=0))
+
+
+# Reasons that are only true under the current rules. If the rules change these are
+# worth revisiting; "excluded", "refuses" and "dealer" are permanent.
+SOFT_SKIPS = ("no trade mention", "not new", "legacy")
+
+
 def load_json(path, fallback):
     if not path.exists():
         return fallback
@@ -904,6 +926,29 @@ def listen(wait=50):
             time.sleep(5)
 
 
+def recheck():
+    """Forget the soft skips so the next runs re-judge them under current rules.
+
+    A listing dropped as "no trade mention" was only correct under the rules in force
+    at the time. When those rules change — as they did when trade matching widened
+    from a phrase list to any mention of trading — those decisions are stale, and a
+    flat seen-list gave no way to find them. Permanent reasons (excluded, refuses,
+    dealer) are kept.
+    """
+    seen = load_seen()
+    stale = {i: why for i, why in seen.items()
+             if any(soft in str(why) for soft in SOFT_SKIPS)}
+    for i in stale:
+        del seen[i]
+    save_seen(seen)
+    by_reason = {}
+    for why in stale.values():
+        key = str(why).split(" (")[0]
+        by_reason[key] = by_reason.get(key, 0) + 1
+    print(f"forgot {len(stale)} soft skips, kept {len(seen)} permanent: {by_reason}")
+    print("they will be re-judged as they resurface in searches (1 credit each)")
+
+
 def show():
     """Print what is actually in force, after rules.json overrides."""
     print(f"searching   : {', '.join(QUERIES)}")
@@ -917,7 +962,7 @@ def show():
 
 
 def main():
-    seen = set(load_json(SEEN, []))
+    seen = load_seen()
     # Already vetted on an earlier run; anything since alerted is dropped.
     pending, dedupe = [], set()
     for l in load_json(PENDING, []):
@@ -925,7 +970,7 @@ def main():
         if lid and lid not in seen and lid not in dedupe:
             dedupe.add(lid)
             pending.append(l)
-    known = seen | {str(l["id"]) for l in pending}
+    known = set(seen) | {str(l["id"]) for l in pending}
 
     unseen = [l for l in search() if str(l.get("id") or "") and str(l["id"]) not in known]
     queue, skips = shortlist(unseen)
@@ -945,7 +990,7 @@ def main():
         alerts = alerts[:MAX_ALERTS]
     for listing, why in skips + more_skips:
         print(f"skip {listing['id']} ({why}): {listing.get('title')}")
-        seen.add(str(listing["id"]))
+        seen[str(listing["id"])] = why      # the reason, so a rule change can revisit it
 
     sent = hot = new = 0
     try:
@@ -955,13 +1000,13 @@ def main():
                 remember(mid, listing)
             # Recorded only after the send lands, so a rate-limit crash re-queues the
             # stragglers instead of burying them as already-seen.
-            seen.add(str(listing["id"]))
+            seen[str(listing["id"])] = "sent"
             sent += 1
             hot += bool(wants)
             new += bool(fresh)
             time.sleep(SEND_DELAY)
     finally:
-        SEEN.write_text(json.dumps(sorted(seen)))
+        save_seen(seen)
         # Anything neither sent nor skipped goes back in the queue, including the
         # tail of a batch that died mid-send. Deduped by id: MAX_ALERTS spillover is
         # still in `batch`, so a naive concat would queue it twice and both re-read
@@ -1250,6 +1295,7 @@ def selftest():
     assert from_alert_text(None)["title"] == "(no specific listing)"
     assert from_alert_text("just some text")["title"] == "just some text"
 
+    seen_reasons_check()
     priority_query_check()
     crash_safety_check()
     cap_defer_check()
@@ -1369,6 +1415,7 @@ class _sandbox:
                      globals()["search"], globals()["detail"], globals()["notify"])
         tmp = pathlib.Path(tempfile.mkdtemp())
         SEEN, PENDING = tmp / "seen.json", tmp / "pending.json"
+        SEEN.write_text("{}")
         SEND_DELAY, MAX_ALERTS = 0, self.max_alerts
         globals()["search"] = lambda: self.listings
         # Recent, so these qualify as NEW and actually reach the send path.
@@ -1379,7 +1426,7 @@ class _sandbox:
         return self
 
     def state(self):
-        return (set(load_json(SEEN, [])),
+        return (set(load_seen()),
                 {str(l["id"]) for l in load_json(PENDING, [])})
 
     def __exit__(self, *exc):
@@ -1438,6 +1485,41 @@ def crash_safety_check():
         assert pending == {"b"}, pending           # the failed one waits its turn
 
 
+def seen_reasons_check():
+    """seen.json records WHY, migrates from the old flat list, and --recheck drops
+    only the decisions that a rule change could invalidate."""
+    import tempfile
+
+    global SEEN
+    keep = SEEN
+    try:
+        SEEN = pathlib.Path(tempfile.mkdtemp()) / "seen.json"
+
+        # legacy flat list still loads, marked so recheck can revisit it
+        SEEN.write_text(json.dumps(["111", "222"]))
+        assert load_seen() == {"111": "legacy", "222": "legacy"}
+
+        save_seen({
+            "a": "sent",
+            "b": "no trade mention",
+            "c": "not new (15d old), no trade mention",
+            "d": "excluded:scooter",
+            "e": "refuses:no trades",
+            "f": "dealer:financing",
+            "g": "legacy",
+        })
+        recheck()
+        left = load_seen()
+        # soft decisions forgotten, permanent ones and deliveries kept
+        assert set(left) == {"a", "d", "e", "f"}, left
+        assert left["a"] == "sent"
+        # idempotent: a second pass changes nothing
+        recheck()
+        assert set(load_seen()) == {"a", "d", "e", "f"}
+    finally:
+        SEEN = keep
+
+
 def priority_query_check():
     """Priority brands run every hour; the rest still all come round."""
     for h in range(24):
@@ -1460,6 +1542,8 @@ if __name__ == "__main__":
         feedback()
     elif "--listen" in sys.argv:
         listen()
+    elif "--recheck" in sys.argv:
+        recheck()
     else:
         try:
             main()
