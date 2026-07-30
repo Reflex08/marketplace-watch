@@ -36,6 +36,7 @@ jobs:
           LNG: "-79.4111"
           RADIUS_KM: "200"
           MAX_PRICE: "15000"
+          MIN_PRICE: "2500"
           PRIORITY_QUERIES: "surron,talaria"
           QUERIES_PER_RUN: "5"
           PAGES_PER_QUERY: "1"

@@ -11,7 +11,6 @@ import pathlib
 import re
 import sys
 import time
-import zlib
 
 import requests
 
@@ -38,33 +37,13 @@ QUERIES = [
 LAT = os.environ.get("LAT", "43.7615")   # North York, Toronto
 LNG = os.environ.get("LNG", "-79.4111")
 RADIUS_KM = os.environ.get("RADIUS_KM", "200")
-MAX_PRICE = os.environ.get("MAX_PRICE", "15000")   # Sur-Ron/Talaria class runs CA$3.5k-10k
-# Every seller gets a different message. Identical text sent to dozens of people is
-# exactly what Meta's spam detection looks for, so the pitch is composed from three
-# rotating parts — 4x4x4 = 64 combinations — keyed off the listing id. Same listing
-# always renders the same text, so a re-send is never a second, different message.
-PITCH_OPENERS = [
-    "Hey, is this still available?",
-    "Hi! Still got this?",
-    "Hey there, is this still for sale?",
-    "Hi, is this still up for grabs?",
-]
-PITCH_OFFERS = [
-    "I've got a go-kart I'd be open to trading for it.",
-    "Would you consider a trade for my go-kart?",
-    "Any chance you'd trade for a go-kart?",
-    "I have a go-kart I'm looking to trade.",
-]
-PITCH_CLOSERS = [
-    "Happy to send pics and a video of it running.",
-    "Can send pics and video if you're interested.",
-    "I can add some cash on top if that helps.",
-    "Let me know and I'll send photos over.",
-]
-# Set PITCH to force one fixed message instead (not recommended — see above).
-PITCH = os.environ.get("PITCH", "").strip()
-# Or set PITCHES to your own '|'-separated variants.
-PITCHES = [p.strip() for p in os.environ.get("PITCHES", "").split("|") if p.strip()]
+MAX_PRICE = os.environ.get("MAX_PRICE", "15000")
+# Sur-Ron / Talaria / E Ride Pro class starts around CA$3.5k used. Anything under this
+# is a scooter, a kids' toy or a fat-tire commuter wearing "dirt bike" in its title.
+# The API's own min_price leaks items well below it, so it is re-checked client-side.
+MIN_PRICE = float(os.environ.get("MIN_PRICE", "2500"))   # Sur-Ron/Talaria class runs CA$3.5k-10k
+# No pitch text: alerts carry the link and the trade status only. Writing the message
+# yourself, per seller, is also what keeps it from looking like a bot.
 
 # Brand/model allowlist. The API keyword-matches loosely, so "ventus" returns golf
 # shafts and "rawrr" returns sweaters — an allowlist kills that permanently where a
@@ -73,23 +52,29 @@ REQUIRE = [
     w.strip().lower()
     for w in os.environ.get(
         "REQUIRE",
-        # the brands you named
+        # the brands you named. Bare "apollo" is out — it matched a Rick Riordan novel
+        # and Apollo's gas RFZ line; "rfn" is the electric one and is specific enough.
         "surron,sur-ron,sur ron,talaria,e ride pro,eride pro,e-ride pro,eride,"
-        "altis,rawrr,79bike,79 bike,ventus,rfn,apollo,segway,"
-        # their models. Bare "mantis" is out: it matches Arc'teryx Mantis packs and a
-        # Marvel action figure. Bare "3x" is out: it matches clothing sized 3XL.
-        "light bee,lightbee,ultra bee,storm bee,lbx,sting,mx3,mx4,mx5,"
-        "falcon,warthog,"
-        # other electric dirt bike makes that show up on Marketplace. Each is qualified
-        # where the bare word is a common English noun (strike, onyx, villain, venom).
-        "kuberg,onyx rcr,volcon,stark varg,delfast,dust moto,kalk,razor mx,ridstar,"
-        "valtinsu,gt54,gt73,emmo,rooder,evoque,arctic leopard,sozo,m2s,zoombike,"
-        "electric motion,bultaco,phatmoto,ebroh,tromox,"
-        "strike shadow,shadow sx,heybike,yozma,kukirin,weped,emoto,e-moto,e moto,"
-        # generic phrasing, for makes not listed above
-        "electric dirt bike,electric dirtbike,e dirt bike,edirt,dirt ebike,"
-        "dirt e-bike,electric motocross,electric enduro,electric pit bike,"
-        "emx,electric moto,ebike dirt,e-bike dirt,dirt bike,dirtbike,pit bike",
+        "altis motors,rawrr,79bike,79 bike,ventus,rfn,"
+        # Segway sells far more scooters than dirt bikes, so only the dirt models.
+        "segway x1,segway x2,segway dirt,"
+        # their models. Bare "mantis" is out: it matches Arc'teryx packs and a Marvel
+        # figure. Bare "3x" matched clothing sized 3XL. Bare "mx3" matched "Rumi Mx350",
+        # and Talaria's MX models are already covered by "talaria".
+        "light bee,lightbee,ultra bee,storm bee,lbx,falcon,warthog,komodo,"
+        # comparable premium makes only. Deliberately NOT here: razor mx, ridstar,
+        # valtinsu, rooder, kukirin, weped, heybike, emmo, gt54, zoombike, phatmoto,
+        # sozo, m2s, ebroh — those are scooters, kids' toys and fat-tire commuters.
+        # "electric motion" is out despite being a real premium brand: it matched
+        # "2023 Electric Motion Sport", a red Chinese e-street-bike. Their model name
+        # is the precise token.
+        "kuberg,onyx rcr,volcon,stark varg,delfast,dust moto,kalk,epure,"
+        "stealth electric,tromox,bultaco,strike shadow,shadow sx,gt73,evoque,"
+        "caofen,lynx,"
+        # generic phrasing, for makes not listed above. Bare "dirt bike" and "pit bike"
+        # are deliberately absent — they let gas bikes and CA$300 toys straight through.
+        "electric dirt bike,electric dirtbike,e dirt bike,dirt ebike,dirt e-bike,"
+        "electric motocross,electric enduro,electric pit bike,emx",
     ).split(",")
     if w.strip()
 ]
@@ -101,9 +86,17 @@ EXCLUDE = [
     w.strip().lower()
     for w in os.environ.get(
         "EXCLUDE",
-        "for parts,parts only,parts,battery only,charger only,key switch,switch,"
+        "for parts,parts only,parts,battery only,charger,key switch,switch,"
         "sprocket,fender,decal,sticker,kickstand,helmet,cover,seat only,"
-        "plastics only,shaft,sweater,for rent,rental",
+        "plastics only,shaft,sweater,for rent,rental,"
+        # gas machines — they reach the search via generic phrasing
+        "cc ,50cc,70cc,110cc,125cc,140cc,150cc,160cc,200cc,250cc,450cc,"
+        "2 stroke,4 stroke,two stroke,four stroke,gas powered,gasoline,petrol,"
+        "yamaha,honda,kawasaki,suzuki,ktm,husqvarna,gas dirt,pit pro,"
+        # scooters and commuters that keep turning up under dirt-bike phrasing
+        "scooter,e-scooter,escooter,moped,fat tire,fat bike,pedal assist,mountain bike,"
+        # street/sport bikes keep arriving under electric-moto phrasing
+        "sport bike,sportbike,street bike,streetbike,sportster,cruiser,ninja",
     ).split(",")
     if w.strip()
 ]
@@ -269,6 +262,7 @@ def search():
                 "lng": LNG,
                 "radius_km": RADIUS_KM,
                 "max_price": MAX_PRICE,
+                "min_price": MIN_PRICE,
                 "sort_by": "creation_time_descend",
                 "date_listed": DATE_LISTED,
                 "availability": "available",
@@ -325,6 +319,13 @@ def rejected(title):
     if not any(w in blob for w in REQUIRE):
         return "not a known model"
     return None
+
+
+def price_of(listing):
+    try:
+        return float((listing.get("price") or {}).get("amount"))
+    except (TypeError, ValueError):
+        return None  # unknown price: let it through rather than miss a real bike
 
 
 def dealer_signal(*texts):
@@ -388,24 +389,8 @@ def snippet(text, phrase, width=70):
     return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
 
 
-def pitch_for(listing_id):
-    """A stable per-listing message. crc32, not hash(), which is salted per process
-    and would send the same seller different text on a retry."""
-    if PITCH:
-        return PITCH
-    h = zlib.crc32(str(listing_id).encode())
-    if PITCHES:
-        return PITCHES[h % len(PITCHES)]
-    return " ".join([
-        PITCH_OPENERS[h % len(PITCH_OPENERS)],
-        PITCH_OFFERS[(h // 7) % len(PITCH_OFFERS)],
-        PITCH_CLOSERS[(h // 53) % len(PITCH_CLOSERS)],
-    ])
-
-
-def card(listing, info=None, hit=None, fresh=False):
-    """Three lines, plus a tag line when the seller wants a trade or the post is new.
-    The pitch is the only <code> element, so there is exactly one thing to tap."""
+def card(listing, info=None, hit=None):
+    """Exactly three lines: trade status, the facts, the link."""
     info = info or {}
     esc = lambda s: html.escape(str(s))
 
@@ -415,21 +400,17 @@ def card(listing, info=None, hit=None, fresh=False):
     if where:
         head += f" · {esc(where)}"
 
-    tags = []
-    if hit:
-        tags.append(f"⚡ <b>WANTS TRADE</b> · <i>{esc(snippet(info.get('description') or listing.get('title'), hit))}</i>")
-    if fresh:
-        when = info.get("listing_date_text")
-        age = age_hours(info)
-        if not when and age is not None:
-            when = f"listed {age:.0f}h ago" if age < 48 else f"listed {age / 24:.0f}d ago"
-        tags.append("🆕 <b>NEW</b>" + (f" · {esc(when)}" if when else ""))
+    age = age_hours(info)
+    if age is not None:
+        head += f" · {age:.0f}h ago" if age < 48 else f" · {age / 24:.0f}d ago"
 
-    lines = tags
-    lines.append(head)
-    lines.append(esc(listing.get("url") or ""))
-    lines.append(f"<code>{esc(pitch_for(listing.get('id')))}</code>")
-    return "\n".join(lines)
+    # Trade status is always stated, so the first glance sorts the list.
+    if hit:
+        status = f"⚡ <b>WANTS TRADE</b> · <i>{esc(snippet(info.get('description') or listing.get('title'), hit))}</i>"
+    else:
+        status = "◽ no trade mention"
+
+    return "\n".join([status, head, esc(listing.get("url") or "")])
 
 
 def notify(text, tries=4):
@@ -486,6 +467,11 @@ def shortlist(fresh):
         if shop:
             skips.append((listing, f"dealer:{shop}"))
             continue
+        price = price_of(listing)
+        if price is not None and price < MIN_PRICE:
+            # Price is in the search result, so this costs nothing.
+            skips.append((listing, f"under {MIN_PRICE:g} (CA${price:g})"))
+            continue
         queue.append((verdict != "yes", listing))   # False sorts first
     queue.sort(key=lambda q: q[0])
     return [listing for _, listing in queue], skips
@@ -528,7 +514,12 @@ def slim(listing):
         "id": str(listing.get("id") or ""),
         "title": listing.get("title"),
         "url": listing.get("url"),
-        "price": {"formatted_amount": (listing.get("price") or {}).get("formatted_amount")},
+        # amount as well as the formatted string: price_of() reads amount, and dropping
+        # it silently disabled the MIN_PRICE floor for everything already queued.
+        "price": {
+            "formatted_amount": (listing.get("price") or {}).get("formatted_amount"),
+            "amount": (listing.get("price") or {}).get("amount"),
+        },
         "location": {"display_name": (listing.get("location") or {}).get("display_name")},
     }
 
@@ -577,7 +568,7 @@ def main():
     sent = hot = new = 0
     try:
         for wants, fresh, listing, info, hit in alerts:
-            notify(card(listing, info, hit, fresh))
+            notify(card(listing, info, hit))
             # Recorded only after the send lands, so a rate-limit crash re-queues the
             # stragglers instead of burying them as already-seen.
             seen.add(str(listing["id"]))
@@ -631,11 +622,11 @@ def selftest():
     assert rejected("Talaria and surron parts") == "part:parts"
     assert rejected("Jetson ebike") == "not a known model"       # commuter e-bike, not wanted
     assert rejected("Ron White sneakers") == "not a known model"  # the 'rawrr' query returns these
-    # real bikes the first, narrower allowlist was throwing away
     assert rejected("2025 Strike Shadow SX 60V") is None
-    assert rejected("HeyBike Villain TRADE") is None
     assert rejected("Gt73Pro *MODDED* (check description)") is None
-    assert rejected("Dirt Bikes Available Yozma heybike jasion") is None
+    # dropped from the allowlist on purpose: fat-tire commuters and cheap imports
+    assert rejected("HeyBike Villain TRADE") == "not a known model"
+    assert rejected("Dirt Bikes Available Yozma heybike jasion") == "not a known model"
     assert rejected(None) == "not a known model"
 
     # negatives must beat positives: these all contain the word "trade"
@@ -707,6 +698,9 @@ def selftest():
     alerts, more = triage(bikes, get_detail=lambda i: details[i])
     assert [a[2]["id"] for a in alerts] == ["both", "trade", "new"], [a[2]["id"] for a in alerts]
     assert [(a[0], a[1]) for a in alerts] == [(True, True), (True, False), (False, True)]
+    # a trade-wanter must never be the one deferred by MAX_ALERTS: sorted first, so
+    # spillover can only ever come off the tail, which is the non-trade end
+    assert all(a[0] for a in alerts[:2]) and not alerts[-1][0]
     dropped = {l["id"]: why for l, why in more}
     assert set(dropped) == {"stale", "refuse"}, dropped
     assert dropped["refuse"].startswith("refuses:")      # hard rule, regardless of being new
@@ -727,10 +721,10 @@ def selftest():
     free_q, free_s = shortlist([{"id": "d", "title": "ELECTRIC DIRT BIKE SALE - financing available"}])
     assert free_q == [] and free_s[0][1].startswith("dealer:"), (free_q, free_s)
 
-    # NEW tag renders and is distinct from the trade tag
-    only_new = card(bikes[0], details["new"], None, fresh=True)
-    assert only_new.startswith("🆕") and "WANTS TRADE" not in only_new
-    assert card(bikes[3], details["both"], "will trade", fresh=True).count("\n") == 4
+    # a new post with no trade mention still says so, and shows its age
+    only_new = card(bikes[0], details["new"])
+    assert only_new.startswith("◽ no trade mention") and "ago" in only_new
+    assert card(bikes[3], details["both"], "will trade").count("\n") == 2
 
     # the junk-query brands are gone from QUERIES but still recognised in REQUIRE
     assert "rawrr" not in QUERIES and rejected("Rawrr Mantis 2024") is None
@@ -738,29 +732,30 @@ def selftest():
     assert rejected("Marvel Legends Mantis action figure") == "not a known model"
     assert rejected("Mens hoodie size 3XL") == "not a known model"
 
-    # trade card: 4 lines, tag carries the quote that triggered it
+    # every card is exactly 3 lines, states trade status, and carries no pitch text
     hot = card(
         fresh[2],
         {"description": "Selling my Light Bee. Trades welcome, prefer a dirt bike or quad.",
-         "location_text": "Vaughan, ON"},
+         "location_text": "Vaughan, ON", "listing_date_text": "Listed 6 hours ago"},
         "trades welcome",
     )
-    assert hot.count("\n") == 3, hot
+    assert hot.count("\n") == 2, hot
     assert hot.startswith("⚡") and "WANTS TRADE" in hot
     assert "Trades welcome, prefer a dirt bike" in hot          # the reasoning, in context
-    assert hot.count("<code>") == 1                             # exactly one thing to copy
-    assert "CA$6,099" in hot and "Vaughan, ON" in hot
+    assert "<code>" not in hot and "go-kart" not in hot         # no copy-paste message
+    assert "CA$6,099" in hot and "Vaughan, ON" in hot and "6h ago" in hot
 
-    # plain card: 3 lines, no tag, no description dump
     plain = card(
-        {"title": "Bike & Trailer <used>", "price": {"formatted_amount": "CA$350"}, "url": "u"},
-        {"description": "x" * 900, "location_text": "Barrie, ON"},
+        {"title": "Bike & Trailer <used>", "price": {"formatted_amount": "CA$5,350"}, "url": "u"},
+        {"description": "x" * 900, "location_text": "Barrie, ON",
+         "listing_date_text": "Listed 3 weeks ago"},
     )
     assert plain.count("\n") == 2, plain
     assert "&amp;" in plain and "&lt;used&gt;" in plain         # escaped, not raw HTML
-    assert not plain.startswith("⚡") and "WANTS TRADE" not in plain
+    assert plain.startswith("◽ no trade mention"), plain        # status always stated
     assert "xxx" not in plain                                   # description body is gone
-    assert len(plain) < 400, len(plain)
+    assert "21d ago" in plain
+    assert len(plain) < 300, len(plain)
 
     assert "<b>" in card({})                                   # survives an empty listing
     # snippet trims around the match and marks the elisions
@@ -771,15 +766,63 @@ def selftest():
     assert snippet("no match here", "trade") == "trade"
     assert snippet(None, None) == ""
 
-    # pitch varies per listing, but is stable for a given listing across runs
-    ids = [str(1_000_000 + i) for i in range(80)]
-    texts = [pitch_for(i) for i in ids]
-    assert texts == [pitch_for(i) for i in ids]                 # deterministic, not random
-    assert len(set(texts)) >= 20, len(set(texts))               # genuinely varied over 80
-    worst = max(texts.count(t) for t in set(texts))
-    assert worst <= 8, worst                                    # no one wording dominates
-    assert all("go-kart" in t for t in texts)                   # the actual offer survives
-    assert len(set(pitch_for(i) for i in ids)) > 1
+    # the junk that was actually getting through, all rejected on the title alone
+    for junk in [
+        "Razor MX650 dirt bike",                 # kids' toy brand, no longer allowlisted
+        "Ridstar Q20 fat tire ebike",
+        "2003 Yamaha YZ250F",                    # gas
+        "2023 Honda CRF 150cc",
+        "Drift hero mini bike 212cc",
+        "Kukirin G4 electric scooter",
+        "HeyBike Villain fat tire",
+        "Freezway Z10 Zero 10x E SCOOTER",
+        "36V e-bike pedal assist",
+        # these actually reached the queue before the allowlist was tightened
+        "The Trials of Apollo",                  # bare "apollo" matched a novel
+        "Apollo RFZ dirtbike",                   # Apollo's gas line, not the electric RFN
+        "2020 Rumi Mx350",                       # bare "mx3" matched a scooter
+        "2025 Segway muse",                      # Segway scooter, not a Segway dirt bike
+        "Segway Ninebot MAX G3 Electric Scooter",
+        "79 bike charger",
+        "2022 Kawasaki KLX 230R Dirt Bike",
+    ]:
+        assert rejected(junk) is not None, junk
+
+    # and the real machines still pass
+    for good in [
+        "2024 Sur-Ron Ultra Bee", "Talaria x3 2025", "E Ride Pro SS 2.0",
+        "79Bike Falcon GT", "2025 Strike Shadow SX 60V", "Gt73Pro *MODDED*",
+        "Talaria Komodo", "Segway X260 dirt bike", "Apollo RFN Rally",
+        "Talaria x3 pro 2025", "Talaria mx5 pro", "Caofen fx electric dirtbike",
+        "79BIKE LYNX | 13Kw | 40ah",
+    ]:
+        assert rejected(good) is None, good
+
+    # a red electric street bike that slipped in via the brand "Electric Motion"
+    assert rejected("2023 Electric Motion Sport") == "not a known model"
+    assert rejected("2020 Kawasaki ninja 400 abs") is not None
+    assert rejected("2002 Harley-Davidson Sportster 883") is not None
+
+    # slim() must preserve the numeric amount or the price floor silently stops working
+    slimmed = slim({"id": "1", "title": "t", "url": "u",
+                    "price": {"amount": 4200, "formatted_amount": "CA$4,200"},
+                    "location": {"display_name": "x"}})
+    assert price_of(slimmed) == 4200.0, slimmed
+    assert shortlist([dict(slimmed, title="Surron LBX")])[0], "slimmed listing must survive"
+
+    # price floor runs free, off the search result
+    q, s = shortlist([
+        {"id": "cheap", "title": "Surron Light Bee", "price": {"amount": 300}},
+        {"id": "ok", "title": "Surron Light Bee", "price": {"amount": 4200}},
+        {"id": "noprice", "title": "Talaria Sting"},
+    ])
+    assert [l["id"] for l in q] == ["ok", "noprice"], q          # unknown price passes
+    assert s[0][1].startswith("under 2500"), s
+
+    # a generic title is allowed, but a CA$1,400 one still dies on price
+    assert rejected("Electric Dirt Bike") is None
+    gq, gs = shortlist([{"id": "g", "title": "Electric Dirt Bike", "price": {"amount": 1400}}])
+    assert gq == [] and "under 2500" in gs[0][1], (gq, gs)
 
     retry_policy_check()
 
