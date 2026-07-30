@@ -1,4 +1,4 @@
-"""Watch Facebook Marketplace for e-bikes whose sellers look open to a trade, and Telegram them to me.
+﻿"""Watch Facebook Marketplace for e-bikes whose sellers look open to a trade, and Telegram them to me.
 
 Ranking, not just filtering: sellers who say they'll trade go out first and flagged,
 sellers who say cash-only or no-trades are dropped entirely.
@@ -77,13 +77,13 @@ MIN_PRICE = tuned_num("min_price", float(os.environ.get("MIN_PRICE", "2500")))
 # yourself, per seller, is also what keeps it from looking like a bot.
 
 # Brand/model allowlist. The API keyword-matches loosely, so "ventus" returns golf
-# shafts and "rawrr" returns sweaters — an allowlist kills that permanently where a
+# shafts and "rawrr" returns sweaters â€” an allowlist kills that permanently where a
 # blocklist would be endless whack-a-mole. Title must hit one of these.
 REQUIRE = [
     w.strip().lower()
     for w in os.environ.get(
         "REQUIRE",
-        # the brands you named. Bare "apollo" is out — it matched a Rick Riordan novel
+        # the brands you named. Bare "apollo" is out â€” it matched a Rick Riordan novel
         # and Apollo's gas RFZ line; "rfn" is the electric one and is specific enough.
         "surron,sur-ron,sur ron,talaria,e ride pro,eride pro,e-ride pro,eride,"
         "altis motors,rawrr,79bike,79 bike,ventus,rfn,"
@@ -95,10 +95,10 @@ REQUIRE = [
         "light bee,lightbee,ultra bee,storm bee,lbx,falcon,warthog,komodo,"
         # comparable premium makes only. Deliberately NOT here: razor mx, ridstar,
         # valtinsu, rooder, kukirin, weped, heybike, emmo, gt54, zoombike, phatmoto,
-        # sozo, m2s, ebroh — those are scooters, kids' toys and fat-tire commuters.
+        # sozo, m2s, ebroh â€” those are scooters, kids' toys and fat-tire commuters.
         # yozma is out too, confirmed by the owner: a "Black yozma in10" was rejected
         # despite its title shouting SEND OFFERS OR TRADES, and that is the wanted
-        # outcome — it is a small ~CA$2k bike, not this class. Trade-willingness does
+        # outcome â€” it is a small ~CA$2k bike, not this class. Trade-willingness does
         # not override the class filter.
         # "electric motion" is out despite being a real premium brand: it matched
         # "2023 Electric Motion Sport", a red Chinese e-street-bike. Their model name
@@ -107,14 +107,14 @@ REQUIRE = [
         "stealth electric,tromox,bultaco,strike shadow,shadow sx,gt73,evoque,"
         "caofen,lynx,"
         # generic phrasing, for makes not listed above. Bare "dirt bike" and "pit bike"
-        # are deliberately absent — they let gas bikes and CA$300 toys straight through.
+        # are deliberately absent â€” they let gas bikes and CA$300 toys straight through.
         "electric dirt bike,electric dirtbike,e dirt bike,dirt ebike,dirt e-bike,"
         "electric motocross,electric enduro,electric pit bike,emx",
     ).split(",")
     if w.strip()
 ]
 
-# Unambiguous "this is a part, not a bike" phrases only. Kept deliberately short —
+# Unambiguous "this is a part, not a bike" phrases only. Kept deliberately short â€”
 # REQUIRE does the heavy lifting, and a broad blocklist would drop real listings
 # like "Surron Light Bee X + spare battery".
 EXCLUDE = [
@@ -124,7 +124,7 @@ EXCLUDE = [
         "for parts,parts only,parts,battery only,charger,key switch,switch,"
         "sprocket,fender,decal,sticker,kickstand,helmet,cover,seat,shock,fork,"
         "plastics only,shaft,sweater,for rent,rental,"
-        # gas machines — they reach the search via generic phrasing
+        # gas machines â€” they reach the search via generic phrasing
         "cc ,50cc,70cc,110cc,125cc,140cc,150cc,160cc,200cc,250cc,450cc,"
         "2 stroke,4 stroke,two stroke,four stroke,gas powered,gasoline,petrol,"
         "yamaha,honda,kawasaki,suzuki,ktm,husqvarna,gas dirt,pit pro,"
@@ -139,7 +139,7 @@ EXCLUDE = [
     if w.strip()
 ]
 
-# Seller has ruled a trade out — don't waste a message on them.
+# Seller has ruled a trade out â€” don't waste a message on them.
 NO_TRADE = [
     p.strip().lower()
     for p in os.environ.get(
@@ -151,7 +151,7 @@ NO_TRADE = [
     if p.strip()
 ]
 
-# Commercial sellers. Hard skip, checked before the trade rules — a dealer that takes
+# Commercial sellers. Hard skip, checked before the trade rules â€” a dealer that takes
 # trade-ins is still a dealer. Title and description both, since they advertise in both.
 DEALER = [
     p.strip().lower()
@@ -166,7 +166,7 @@ DEALER = [
     if p.strip()
 ]
 
-# Seller has invited a trade — send these first.
+# Seller has invited a trade â€” send these first.
 TRADE_OK = [
     p.strip().lower()
     for p in os.environ.get(
@@ -180,7 +180,7 @@ TRADE_OK = [
 
 SEND_DELAY = float(os.environ.get("SEND_DELAY", "1.2"))  # Telegram allows ~1 msg/sec per chat
 
-# Queries that run every single time, no matter the rotation — the brands worth
+# Queries that run every single time, no matter the rotation â€” the brands worth
 # knowing about within the hour rather than within three.
 PRIORITY_QUERIES = [
     q.strip()
@@ -189,11 +189,11 @@ PRIORITY_QUERIES = [
 ]
 
 # Total queries per run, priority ones first and the remainder rotated in. Searching
-# every brand every hour costs credits for no benefit — new bikes in this class appear
+# every brand every hour costs credits for no benefit â€” new bikes in this class appear
 # a few times a week. 0 means run everything every time.
 QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "5"))
 
-# Send a listing if it is NEW or if it MENTIONS A TRADE. Never if it refuses trades —
+# Send a listing if it is NEW or if it MENTIONS A TRADE. Never if it refuses trades â€”
 # that check runs first and wins outright. "New" is read from the detail call's
 # creation_time, which we are paying for anyway to apply the refusal rule.
 NEW_HOURS = float(os.environ.get("NEW_HOURS", "48"))
@@ -212,7 +212,7 @@ MAX_ALERTS = int(os.environ.get("MAX_ALERTS", "6"))
 PAGES_PER_QUERY = int(os.environ.get("PAGES_PER_QUERY", "1"))
 DATE_LISTED = os.environ.get("DATE_LISTED", "all")
 
-# Everything above is the baseline; rules.json — written by your Telegram replies —
+# Everything above is the baseline; rules.json â€” written by your Telegram replies â€”
 # gets the final say. Applied here in one place so no setting is accidentally
 # un-tunable, and so `--show` can print exactly what is in force.
 REQUIRE = tuned("require", REQUIRE)
@@ -264,7 +264,7 @@ def call(url, params, tries=3):
     """Retries transient failures.
 
     Observed live: this API returns a 404 for an item that exists, and the retry
-    then succeeds — so 404 is retried too. Only auth failures are treated as
+    then succeeds â€” so 404 is retried too. Only auth failures are treated as
     permanent, since no amount of retrying fixes a bad key. An explicit
     success:false raises straight away.
     """
@@ -277,7 +277,7 @@ def call(url, params, tries=3):
                 timeout=60,
             )
             if r.status_code in (401, 403):
-                raise RuntimeError(f"auth rejected ({r.status_code}) — check the API key")
+                raise RuntimeError(f"auth rejected ({r.status_code}) â€” check the API key")
             r.raise_for_status()
             payload = r.json()
         except (requests.RequestException, ValueError) as exc:
@@ -400,7 +400,9 @@ def rejected(title):
     blob = (title or "").lower()
     hit = next((w for w in EXCLUDE if w in blob), None)
     if hit:
-        return f"part:{hit}"
+        # not just parts any more â€” gas bikes, scooters, street bikes and ruled-out
+        # makes all live in EXCLUDE, so the label stays neutral
+        return f"excluded:{hit}"
     if not any(w in blob for w in REQUIRE):
         return "not a known model"
     return None
@@ -427,7 +429,7 @@ TRADE_WORD = re.compile(r"\b(trade|trades|traded|trading|swap|swaps|swapping)\b"
 
 
 def trade_signal(*texts):
-    """('no'|'yes'|None, matched phrase) — read from title AND description.
+    """('no'|'yes'|None, matched phrase) â€” read from title AND description.
 
     Negatives are checked first because they contain the positives: "no trades"
     would otherwise match "trade" and get promoted instead of dropped.
@@ -481,7 +483,7 @@ def snippet(text, phrase, width=70):
         return phrase or ""
     pad = max(0, (width - len(phrase)) // 2)
     start, end = max(0, i - pad), min(len(flat), i + len(phrase) + pad)
-    return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
+    return ("â€¦" if start else "") + flat[start:end] + ("â€¦" if end < len(flat) else "")
 
 
 def card(listing, info=None, hit=None):
@@ -490,20 +492,20 @@ def card(listing, info=None, hit=None):
     esc = lambda s: html.escape(str(s))
 
     head = f"<b>{esc(listing.get('title') or '(no title)')}</b>"
-    head += f" — {esc((listing.get('price') or {}).get('formatted_amount', '?'))}"
+    head += f" â€” {esc((listing.get('price') or {}).get('formatted_amount', '?'))}"
     where = info.get("location_text") or (listing.get("location") or {}).get("display_name")
     if where:
-        head += f" · {esc(where)}"
+        head += f" Â· {esc(where)}"
 
     age = age_hours(info)
     if age is not None:
-        head += f" · {age:.0f}h ago" if age < 48 else f" · {age / 24:.0f}d ago"
+        head += f" Â· {age:.0f}h ago" if age < 48 else f" Â· {age / 24:.0f}d ago"
 
     # Trade status is always stated, so the first glance sorts the list.
     if hit:
-        status = f"⚡ <b>WANTS TRADE</b> · <i>{esc(snippet(info.get('description') or listing.get('title'), hit))}</i>"
+        status = f"âš¡ <b>WANTS TRADE</b> Â· <i>{esc(snippet(info.get('description') or listing.get('title'), hit))}</i>"
     else:
-        status = "◽ no trade mention"
+        status = "â—½ no trade mention"
 
     return "\n".join([status, head, esc(listing.get("url") or "")])
 
@@ -596,7 +598,7 @@ def triage(listings, get_detail=None):
         fresh = age is not None and age <= NEW_HOURS
         wants = verdict == "yes"
         if not (fresh or wants):
-            # Read, judged, discarded — but recorded, so the credit is never respent.
+            # Read, judged, discarded â€” but recorded, so the credit is never respent.
             aged = "age unknown" if age is None else f"{age / 24:.0f}d old"
             skips.append((listing, f"not new ({aged}), no trade mention"))
             continue
@@ -641,16 +643,16 @@ def remember(message_id, listing):
 def from_alert_text(text):
     """Recover title/price from an alert's own text, for replies we have no record of.
 
-    Alerts are three lines: status, "<title> — <price> · <where> · <age>", link.
+    Alerts are three lines: status, "<title> â€” <price> Â· <where> Â· <age>", link.
     """
     if not text:
         return {"title": "(no specific listing)", "price": ""}
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    facts = next((l for l in lines if "—" in l), None)
+    facts = next((l for l in lines if "â€”" in l), None)
     if not facts:
         return {"title": lines[0] if lines else "(no specific listing)", "price": ""}
-    title, _, rest = facts.partition("—")
-    return {"title": title.strip(), "price": rest.split("·")[0].strip()}
+    title, _, rest = facts.partition("â€”")
+    return {"title": title.strip(), "price": rest.split("Â·")[0].strip()}
 
 
 RULE_TOOL = {
@@ -680,7 +682,7 @@ RULE_TOOL = {
             "value": {
                 "type": "string",
                 "description": "The brand, phrase, or number. Lowercase for text. Keep text "
-                               "as short as possible while still being specific — one or two "
+                               "as short as possible while still being specific â€” one or two "
                                "words. Never a whole listing title.",
             },
             "reply": {
@@ -733,7 +735,7 @@ def interpret(feedback, listing):
                 "entirely. If the feedback is vague, positive, or you would have to guess "
                 "at a number, use action 'none' and say what you'd need to know.\n\n"
                 "CRITICAL: for mark_dealer and mark_no_trade the value must be the "
-                "commercial or refusal PHRASE that identifies the type of seller — "
+                "commercial or refusal PHRASE that identifies the type of seller â€” "
                 "'financing', 'plus taxes', 'in stock', 'no trades'. NEVER a brand name, "
                 "model name or listing title: those are what he is shopping for, and "
                 "blocking one would hide every bike of that make. Same for block_word.\n\n"
@@ -784,7 +786,7 @@ def apply_rule(rule):
 
     # Refuse any blocking rule whose text collides with a brand we are hunting.
     # Observed live: "this guy is obviously a dealer" produced
-    # mark_dealer="talaria mx5 pro 72v" — the listing title. Had it produced
+    # mark_dealer="talaria mx5 pro 72v" â€” the listing title. Had it produced
     # "talaria", every Talaria would have been silently filtered out forever.
     if action in ("block_word", "mark_dealer", "mark_no_trade"):
         low = value.lower()
@@ -857,7 +859,7 @@ def feedback(wait=0):
         listing = msgs.get(str(replied_to), {}) if replied_to else {}
         if not listing:
             # Telegram echoes the original message back inside reply_to_message, so the
-            # alert text itself is a fallback when state.json has no record of it —
+            # alert text itself is a fallback when state.json has no record of it â€”
             # e.g. alerts sent before this feature existed.
             listing = from_alert_text((msg.get("reply_to_message") or {}).get("text"))
         try:
@@ -868,7 +870,7 @@ def feedback(wait=0):
         what = apply_rule(rule) if rule else None
         note = (rule or {}).get("reply") or "Nothing to change."
         print(f"reply {text!r} -> {what or 'no change'}")
-        notify(("✅ " if what else "🤔 ") + html.escape(note))
+        notify(("âœ… " if what else "ðŸ¤” ") + html.escape(note))
         applied += bool(what)
 
     STATE.write_text(json.dumps(state))
@@ -880,10 +882,10 @@ def listen(wait=50):
     """Stay connected and answer replies the moment they arrive.
 
     Long polling, so an idle hour is a handful of held-open requests rather than
-    thousands of empty ones — and Telegram's getUpdates is free either way. Only
+    thousands of empty ones â€” and Telegram's getUpdates is free either way. Only
     the Claude call costs anything, and that only fires on an actual reply.
     """
-    print(f"listening (long poll {wait}s) — Ctrl-C to stop", flush=True)
+    print(f"listening (long poll {wait}s) â€” Ctrl-C to stop", flush=True)
     while True:
         try:
             feedback(wait=wait)
@@ -990,20 +992,25 @@ def selftest():
     assert rejected("Talaria 3x 2023") is None
     assert rejected("79Bike Falcon GT - Demonstration Model NEW") is None
     assert rejected("Surron LBX (2 batteries)") is None          # "batteries" != "battery only"
-    assert rejected("2025 Fujikura Ventus FW 6-S Shaft") == "part:shaft"
-    assert rejected("Brand New Tommy Hilfiger Crewneck Sweater") == "part:sweater"
+    assert rejected("2025 Fujikura Ventus FW 6-S Shaft") == "excluded:shaft"
+    assert rejected("Brand New Tommy Hilfiger Crewneck Sweater") == "excluded:sweater"
     assert rejected("Used book - a novel") == "not a known model"
-    assert rejected("100% altis helmet kids") == "part:helmet"
-    assert rejected("Key switch for surron and mx3") == "part:key switch"
-    assert rejected("Talaria and surron parts") == "part:parts"
+    assert rejected("100% altis helmet kids") == "excluded:helmet"
+    assert rejected("Key switch for surron and mx3") == "excluded:key switch"
+    assert rejected("Talaria and surron parts") == "excluded:parts"
     assert rejected("Jetson ebike") == "not a known model"       # commuter e-bike, not wanted
     assert rejected("Ron White sneakers") == "not a known model"  # the 'rawrr' query returns these
     assert rejected("2025 Strike Shadow SX 60V") is None
     assert rejected("Gt73Pro *MODDED* (check description)") is None
     # dropped from the allowlist on purpose: fat-tire commuters and cheap imports
     assert rejected("HeyBike Villain TRADE") == "not a known model"
-    assert rejected("Dirt Bikes Available Yozma heybike jasion") == "not a known model"
     assert rejected(None) == "not a known model"
+    # yozma is blocked by make now, so these are rejected on the name rather than for
+    # failing the allowlist — they were reaching the queue via generic "electric dirt
+    # bike" phrasing, which the allowlist alone lets through
+    assert rejected("Dirt Bikes Available Yozma heybike jasion") == "excluded:yozma"
+    assert rejected("Yozma IN 10 Pro Off-Road Electric Dirt Bike") == "excluded:yozma"
+    assert rejected("Black yozma in10 (SEND OFFERS OR TRADES)") == "excluded:yozma"
 
     # negatives must beat positives: these all contain the word "trade"
     assert trade_signal("Ebike NO TRADES")[0] == "no"
@@ -1014,7 +1021,7 @@ def selftest():
     assert trade_signal("plain ebike", "good condition") == (None, None)
     assert trade_signal(None, None) == (None, None)
 
-    # phrasings no hand-written list would cover — the real listing that exposed this
+    # phrasings no hand-written list would cover â€” the real listing that exposed this
     # said "will take trades for Seadoos, Spark, Trixxs", and "trades for" is not a
     # substring of "trade for"
     john = "Talaria X3 Pro, we'll take trades for Seadoos, Spark, Trixxs. Can add cash on top."
@@ -1031,7 +1038,7 @@ def selftest():
     _, hit = trade_signal("Talaria x3 pro", john)
     assert "Seadoos" in snippet(john, hit), snippet(john, hit)
 
-    # real listing 1357502152470801, verbatim — the refusal is in the last line,
+    # real listing 1357502152470801, verbatim â€” the refusal is in the last line,
     # after 500 characters of enthusiastic build notes
     real = (
         "Ready to ride. Zero mechanical issues and the battery health is perfect. It is "
@@ -1058,7 +1065,7 @@ def selftest():
     ]
     queue, skips = shortlist(fresh)
     assert [l["id"] for l in queue] == ["t", "n", "y"], queue   # advertised trade first
-    assert sorted(s[1].split(":")[0] for s in skips) == ["part", "refuses"]
+    assert sorted(s[1].split(":")[0] for s in skips) == ["excluded", "refuses"]
 
     # age parsing, from both sources
     now = datetime.datetime(2026, 7, 30, 12, 0, tzinfo=datetime.timezone.utc)
@@ -1116,7 +1123,7 @@ def selftest():
 
     # a new post with no trade mention still says so, and shows its age
     only_new = card(bikes[0], details["new"])
-    assert only_new.startswith("◽ no trade mention") and "ago" in only_new
+    assert only_new.startswith("â—½ no trade mention") and "ago" in only_new
     assert card(bikes[3], details["both"], "will trade").count("\n") == 2
 
     # the junk-query brands are gone from QUERIES but still recognised in REQUIRE
@@ -1133,7 +1140,7 @@ def selftest():
         "trades welcome",
     )
     assert hot.count("\n") == 2, hot
-    assert hot.startswith("⚡") and "WANTS TRADE" in hot
+    assert hot.startswith("âš¡") and "WANTS TRADE" in hot
     assert "Trades welcome, prefer a dirt bike" in hot          # the reasoning, in context
     assert "<code>" not in hot and "go-kart" not in hot         # no copy-paste message
     assert "CA$6,099" in hot and "Vaughan, ON" in hot and "6h ago" in hot
@@ -1145,7 +1152,7 @@ def selftest():
     )
     assert plain.count("\n") == 2, plain
     assert "&amp;" in plain and "&lt;used&gt;" in plain         # escaped, not raw HTML
-    assert plain.startswith("◽ no trade mention"), plain        # status always stated
+    assert plain.startswith("â—½ no trade mention"), plain        # status always stated
     assert "xxx" not in plain                                   # description body is gone
     assert "21d ago" in plain
     assert len(plain) < 300, len(plain)
@@ -1153,8 +1160,8 @@ def selftest():
     assert "<b>" in card({})                                   # survives an empty listing
     # snippet trims around the match and marks the elisions
     long_desc = "a" * 200 + " open to trades " + "b" * 200
-    assert snippet(long_desc, "open to trades").startswith("…")
-    assert snippet(long_desc, "open to trades").endswith("…")
+    assert snippet(long_desc, "open to trades").startswith("â€¦")
+    assert snippet(long_desc, "open to trades").endswith("â€¦")
     assert "open to trades" in snippet(long_desc, "open to trades")
     assert snippet("no match here", "trade") == "trade"
     assert snippet(None, None) == ""
@@ -1225,14 +1232,14 @@ def selftest():
     retry_policy_check()
 
     # a reply must be understandable from the alert's own text, with no state.json
-    # record — alerts sent before this feature existed have no stored mapping
-    alert = ("◽ no trade mention\n"
-             "2023 Electric Motion Sport — CA$2,500 · Innisfil, ON · 20h ago\n"
+    # record â€” alerts sent before this feature existed have no stored mapping
+    alert = ("â—½ no trade mention\n"
+             "2023 Electric Motion Sport â€” CA$2,500 Â· Innisfil, ON Â· 20h ago\n"
              "https://www.facebook.com/marketplace/item/990267120720477/")
     got = from_alert_text(alert)
     assert got["title"] == "2023 Electric Motion Sport", got
     assert got["price"] == "CA$2,500", got
-    hot = "⚡ WANTS TRADE · …trades for a quad…\nTalaria x3 — CA$5,500\nhttp://x"
+    hot = "âš¡ WANTS TRADE Â· â€¦trades for a quadâ€¦\nTalaria x3 â€” CA$5,500\nhttp://x"
     assert from_alert_text(hot)["title"] == "Talaria x3"
     assert from_alert_text(None)["title"] == "(no specific listing)"
     assert from_alert_text("just some text")["title"] == "just some text"
@@ -1246,7 +1253,7 @@ def selftest():
 
 def rules_check():
     """rules.json must override the baseline, and a blocked brand must stop being
-    searched as well as sent — otherwise "no more segways" still costs a credit."""
+    searched as well as sent â€” otherwise "no more segways" still costs a credit."""
     import tempfile
 
     global RULES, _RULES
@@ -1396,7 +1403,7 @@ def cap_defer_check():
         main()
         seen2, pending2 = box.state()
         assert len(seen2) == 2 and len(pending2) == 1, (seen2, pending2)
-        # and again, until the queue is empty — never growing
+        # and again, until the queue is empty â€” never growing
         main()
         seen3, pending3 = box.state()
         assert len(seen3) == 3 and pending3 == set(), (seen3, pending3)
@@ -1452,7 +1459,7 @@ if __name__ == "__main__":
             main()
         except Exception as exc:
             try:
-                notify(f"⚠️ <b>watcher failed</b>\n{html.escape(str(exc)[:400])}")
+                notify(f"âš ï¸ <b>watcher failed</b>\n{html.escape(str(exc)[:400])}")
             except Exception:
                 pass          # Telegram itself may be what broke; the red run still tells him
             raise
