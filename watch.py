@@ -631,6 +631,21 @@ def remember(message_id, listing):
     STATE.write_text(json.dumps(state))
 
 
+def from_alert_text(text):
+    """Recover title/price from an alert's own text, for replies we have no record of.
+
+    Alerts are three lines: status, "<title> — <price> · <where> · <age>", link.
+    """
+    if not text:
+        return {"title": "(no specific listing)", "price": ""}
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    facts = next((l for l in lines if "—" in l), None)
+    if not facts:
+        return {"title": lines[0] if lines else "(no specific listing)", "price": ""}
+    title, _, rest = facts.partition("—")
+    return {"title": title.strip(), "price": rest.split("·")[0].strip()}
+
+
 RULE_TOOL = {
     "name": "adjust",
     "description": "Apply one adjustment to the bike-watcher's filters, based on the user's "
@@ -809,9 +824,10 @@ def feedback():
             continue
         listing = msgs.get(str(replied_to), {}) if replied_to else {}
         if not listing:
-            # A bare message with no reply is still usable — "no more segways" needs
-            # no listing context.
-            listing = {"title": "(no specific listing)", "price": ""}
+            # Telegram echoes the original message back inside reply_to_message, so the
+            # alert text itself is a fallback when state.json has no record of it —
+            # e.g. alerts sent before this feature existed.
+            listing = from_alert_text((msg.get("reply_to_message") or {}).get("text"))
         try:
             rule = interpret(text, listing)
         except Exception as exc:
@@ -1118,9 +1134,12 @@ def selftest():
     for good in [
         "2024 Sur-Ron Ultra Bee", "Talaria x3 2025", "E Ride Pro SS 2.0",
         "79Bike Falcon GT", "2025 Strike Shadow SX 60V", "Gt73Pro *MODDED*",
-        "Talaria Komodo", "Segway X260 dirt bike", "Apollo RFN Rally",
+        "Talaria Komodo", "Apollo RFN Rally",
         "Talaria x3 pro 2025", "Talaria mx5 pro", "Caofen fx electric dirtbike",
         "79BIKE LYNX | 13Kw | 40ah",
+        # Segway is deliberately absent: it is a brand the owner can block by reply,
+        # and asserting on it here would make the suite fail on his preference rather
+        # than on a code defect.
     ]:
         assert rejected(good) is None, good
 
@@ -1151,6 +1170,19 @@ def selftest():
     assert gq == [] and "under 2500" in gs[0][1], (gq, gs)
 
     retry_policy_check()
+
+    # a reply must be understandable from the alert's own text, with no state.json
+    # record — alerts sent before this feature existed have no stored mapping
+    alert = ("◽ no trade mention\n"
+             "2023 Electric Motion Sport — CA$2,500 · Innisfil, ON · 20h ago\n"
+             "https://www.facebook.com/marketplace/item/990267120720477/")
+    got = from_alert_text(alert)
+    assert got["title"] == "2023 Electric Motion Sport", got
+    assert got["price"] == "CA$2,500", got
+    hot = "⚡ WANTS TRADE · …trades for a quad…\nTalaria x3 — CA$5,500\nhttp://x"
+    assert from_alert_text(hot)["title"] == "Talaria x3"
+    assert from_alert_text(None)["title"] == "(no specific listing)"
+    assert from_alert_text("just some text")["title"] == "just some text"
 
     priority_query_check()
     crash_safety_check()

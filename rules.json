@@ -1,1 +1,8 @@
-{}
+{
+  "brands_blocked": [
+    "segway"
+  ],
+  "exclude_add": [
+    "racing bike"
+  ]
+}
