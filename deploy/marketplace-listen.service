@@ -1,0 +1,24 @@
+[Unit]
+Description=Marketplace watcher - answer Telegram replies instantly
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mwatch
+WorkingDirectory=/opt/marketplace-watch
+EnvironmentFile=/etc/marketplace-watch.env
+ExecStart=/opt/marketplace-watch/.venv/bin/python -u /opt/marketplace-watch/watch.py --listen
+# Long polling holds a connection open; if it drops, come straight back.
+Restart=always
+RestartSec=10
+# A crash loop should back off rather than hammer Telegram.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

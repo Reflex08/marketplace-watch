@@ -68,6 +68,53 @@ A listing is recorded as seen only after its alert is actually delivered, so a c
 mid-run re-alerts the stragglers next time rather than burying them. If a run fails outright it
 sends you a ⚠️ message and turns the Actions job red.
 
+## Running it
+
+Two options. **Pick one** — running both means duplicate alerts and, worse, the two
+processes steal each other's Telegram replies, because `getUpdates` hands each message
+to whoever asks first.
+
+### GitHub Actions (free, hourly)
+
+Secrets go in Settings -> Secrets and variables -> Actions: `SCRAPECREATORS_KEY`,
+`TG_TOKEN`, `TG_CHAT`, `ANTHROPIC_API_KEY`. The workflow searches hourly and processes
+replies at the top of each run. No server, but it cannot hold a connection open, so
+reply-tuning is hourly rather than instant.
+
+### DigitalOcean droplet (~$4-6/mo, instant replies)
+
+Any Ubuntu droplet, smallest size. Once you can `ssh root@<ip>`:
+
+```sh
+sudo bash deploy/install.sh <SCRAPECREATORS_KEY> <TG_TOKEN> <TG_CHAT> [ANTHROPIC_API_KEY]
+```
+
+or fetch it directly:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Reflex08/marketplace-watch/main/deploy/install.sh \
+  | sudo bash -s -- <SCRAPECREATORS_KEY> <TG_TOKEN> <TG_CHAT> <ANTHROPIC_API_KEY>
+```
+
+That gives you two units:
+
+| Unit | What |
+|---|---|
+| `marketplace-watch.timer` | hourly search + alerts |
+| `marketplace-listen.service` | persistent long poll, answers replies in seconds |
+
+Secrets land in `/etc/marketplace-watch.env`, mode 600, never in the repo — which is
+public. State (`seen.json`, `pending.json`, `rules.json`) stays on the droplet's disk;
+nothing is committed back.
+
+```sh
+journalctl -u marketplace-watch -u marketplace-listen -f     # logs
+/opt/marketplace-watch/.venv/bin/python /opt/marketplace-watch/watch.py --show
+```
+
+**Then disable the Actions schedule** — comment out the `schedule:` block in
+`.github/workflows/watch.yml` — or you will have two runners fighting.
+
 ## Setup
 
 1. **Search API key** — sign up at https://scrapecreators.com.

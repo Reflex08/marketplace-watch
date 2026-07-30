@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the marketplace search hourly
+
+[Timer]
+OnCalendar=hourly
+# Spread the load off the exact hour, and don't skip a run if the box was rebooting.
+RandomizedDelaySec=180
+Persistent=true
+Unit=marketplace-watch.service
+
+[Install]
+WantedBy=timers.target
