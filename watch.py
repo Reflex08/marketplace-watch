@@ -136,7 +136,13 @@ DATE_LISTED = os.environ.get("DATE_LISTED", "all")
 
 
 def call(url, params, tries=3):
-    """Retries transient failures. A 4xx or an explicit success:false raises at once."""
+    """Retries transient failures.
+
+    Observed live: this API returns a 404 for an item that exists, and the retry
+    then succeeds — so 404 is retried too. Only auth failures are treated as
+    permanent, since no amount of retrying fixes a bad key. An explicit
+    success:false raises straight away.
+    """
     for attempt in range(tries):
         try:
             r = requests.get(
@@ -145,8 +151,8 @@ def call(url, params, tries=3):
                 params=params,
                 timeout=60,
             )
-            if r.status_code >= 500:
-                raise requests.HTTPError(f"upstream {r.status_code}")
+            if r.status_code in (401, 403):
+                raise RuntimeError(f"auth rejected ({r.status_code}) — check the API key")
             r.raise_for_status()
             payload = r.json()
         except (requests.RequestException, ValueError) as exc:
@@ -554,10 +560,45 @@ def selftest():
     assert "…" in card({"title": "t"}, {"description": "x" * (DESC_CHARS + 50)})
     assert "<b>" in card({})                                   # survives an empty listing
 
+    retry_policy_check()
+
     priority_query_check()
     crash_safety_check()
     cap_defer_check()
     print("ok")
+
+
+def retry_policy_check():
+    """404 and 500 retry (both proved transient live); 401 gives up at once."""
+    import unittest.mock as mock
+
+    class Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"{self.status_code}")
+
+        def json(self):
+            return {"success": True, "listings": []}
+
+    os.environ.setdefault("SCRAPECREATORS_KEY", "test")
+    for code in (404, 500):
+        seq = [Resp(code), Resp(200)]
+        with mock.patch.object(requests, "get", side_effect=seq), \
+             mock.patch.object(time, "sleep", lambda _s: None):
+            assert call("u", {}) == {"success": True, "listings": []}, code
+
+    for code in (401, 403):
+        with mock.patch.object(requests, "get", return_value=Resp(code)) as g, \
+             mock.patch.object(time, "sleep", lambda _s: None):
+            try:
+                call("u", {})
+                raise AssertionError(f"{code} should not be retried")
+            except RuntimeError as exc:
+                assert "auth rejected" in str(exc), exc
+            assert g.call_count == 1, g.call_count   # no retries burned on a bad key
 
 
 class _sandbox:
