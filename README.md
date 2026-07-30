@@ -9,15 +9,19 @@ the scraping happens on ScrapeCreators' infrastructure, so your account is never
 
 ## How it decides
 
-1. **Search** `QUERIES_PER_RUN` of the brands in `QUERIES`, striding through the list so each run
-   samples a spread and every query comes round every few hours. 1 credit each. A query that fails
-   is logged and skipped; the run only dies if *all* of them fail.
+1. **Search** `QUERIES_PER_RUN` brands: everything in `PRIORITY_QUERIES` every single run, plus a
+   rotating stride through the rest so each comes round every couple of hours. `PAGES_PER_QUERY`
+   pages each, 1 credit per page. A query that fails is logged and skipped; the run only dies if
+   *all* of them fail.
 2. **Free title pass** (`shortlist`). Must match a brand or model in `REQUIRE`, must not match a
    part word in `EXCLUDE`, must not already say "no trades"/"cash only" in the title. No credits
    spent here — typically 80% of results die at this step. Survivors are ordered so titles already
    advertising a trade go first.
-3. **Cap at `MAX_ALERTS`.** The rest are *held*, not dropped: they stay unseen and arrive on later
-   runs. This is what keeps the standing inventory arriving as a trickle instead of 50 at once.
+3. **Cap at `MAX_ALERTS`.** The rest go to `pending.json` and arrive on later runs — a trickle
+   rather than 84 messages at once. The queue is persisted because a listing found on page 4 will
+   not reappear on tomorrow's page 1, so an in-memory defer would lose it. The whole queue is
+   re-ranked every run, so a bike advertising a trade jumps ahead of stock that has merely been
+   waiting longer.
 4. **Read the description** for that batch only (1 credit each) to judge trade intent.
 5. **Drop refusers**, then **rank** — sellers saying "trades welcome", "swap", "trade for"
    (`TRADE_OK`) are flagged 🔥 and sent first.
@@ -58,9 +62,19 @@ Everything is an env var in `.github/workflows/watch.yml` — `QUERIES`, `QUERIE
 `PITCH`. Add brands to `QUERIES` *and* `REQUIRE` together, or the allowlist will reject its own
 results.
 
-Cost per run is `QUERIES_PER_RUN` credits plus at most `MAX_ALERTS` — 3 + up to 6 on the defaults,
-so ~72/day steady-state once the standing inventory has been worked through. Levers, cheapest first:
-raise the cron interval, lower `QUERIES_PER_RUN`, lower `MAX_ALERTS`.
+Cost per run is `QUERIES_PER_RUN` × `PAGES_PER_QUERY` credits plus at most `MAX_ALERTS` — 5 + up to
+6 on the defaults, so ~120-260/day. Levers, cheapest first: raise the cron interval, lower
+`QUERIES_PER_RUN`, lower `MAX_ALERTS`.
+
+`PAGES_PER_QUERY` is 1 because results are sorted newest-first, so page 1 always holds anything new.
+Deep pages only matter for sweeping up old standing stock, which is a one-off:
+
+```sh
+QUERIES_PER_RUN=0 PAGES_PER_QUERY=5 MAX_ALERTS=0 python watch.py    # discover, alert nothing
+```
+
+That found 394 listings and queued 84 real bikes for ~33 credits. Repeat it if the queue ever empties
+and you suspect there is older stock you have not seen.
 
 `altis motors`, `rawrr` and `ventus` are intentionally not in `QUERIES` — over several live runs they
 returned only sneakers, hockey cards and golf shafts. The brands remain in `REQUIRE`, so a genuine

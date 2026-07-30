@@ -15,6 +15,9 @@ import requests
 SEARCH_API = "https://api.scrapecreators.com/v1/facebook/marketplace/search"
 ITEM_API = "https://api.scrapecreators.com/v1/facebook/marketplace/item"
 SEEN = pathlib.Path(__file__).with_name("seen.json")
+# Vetted listings not yet alerted. Persisted because the cap defers more than it
+# sends, and a deferred listing found on page 3 won't reappear on tomorrow's page 1.
+PENDING = pathlib.Path(__file__).with_name("pending.json")
 
 # Each query returns a different rotating slice, so several widen coverage a lot.
 QUERIES = [
@@ -107,15 +110,29 @@ TRADE_OK = [
 DESC_CHARS = int(os.environ.get("DESC_CHARS", "400"))
 SEND_DELAY = float(os.environ.get("SEND_DELAY", "1.2"))  # Telegram allows ~1 msg/sec per chat
 
-# Searching every brand every hour costs 10 credits a run for no benefit — new bikes
-# in this class appear a few times a week. Rotate a few per run instead; each query
-# still gets checked several times a day. 0 disables rotation.
-QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "3"))
+# Queries that run every single time, no matter the rotation — the brands worth
+# knowing about within the hour rather than within three.
+PRIORITY_QUERIES = [
+    q.strip()
+    for q in os.environ.get("PRIORITY_QUERIES", "surron,talaria").split(",")
+    if q.strip()
+]
+
+# Total queries per run, priority ones first and the remainder rotated in. Searching
+# every brand every hour costs credits for no benefit — new bikes in this class appear
+# a few times a week. 0 means run everything every time.
+QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "5"))
 
 # Alerts per run. Caps the detail spend and, more importantly, means the standing
 # inventory arrives as a trickle rather than 50 messages at once. Overflow is not
 # dropped — it stays unseen and comes on later runs, newest and trade-friendly first.
 MAX_ALERTS = int(os.environ.get("MAX_ALERTS", "6"))
+
+# Pages to read per query, 1 credit each. Page 1 is the newest listings, so 1 is
+# enough for ongoing watching. Raise it temporarily to sweep up old standing stock:
+# surron alone goes from 24 listings at 1 page to 79 at 4.
+PAGES_PER_QUERY = int(os.environ.get("PAGES_PER_QUERY", "1"))
+DATE_LISTED = os.environ.get("DATE_LISTED", "all")
 
 
 def call(url, params, tries=3):
@@ -151,20 +168,27 @@ def query_slice(hour=None):
     queries tend to be similar, so a block can spend a whole run on one weak
     corner of the list while a stride always samples a spread.
     """
-    n = len(QUERIES)
-    if QUERIES_PER_RUN <= 0 or QUERIES_PER_RUN >= n:
+    if QUERIES_PER_RUN <= 0 or QUERIES_PER_RUN >= len(QUERIES):
         return list(QUERIES)
+
+    priority = [q for q in PRIORITY_QUERIES if q][:QUERIES_PER_RUN]
+    rest = [q for q in QUERIES if q not in priority]
+    slots = QUERIES_PER_RUN - len(priority)
+    if slots <= 0 or not rest:
+        return priority
+
     if hour is None:
         hour = int(time.time() // 3600)
-    step = max(1, n // QUERIES_PER_RUN)
+    n = len(rest)
+    step = max(1, n // slots)
     picked, out = set(), []
     i = hour % n
-    while len(out) < QUERIES_PER_RUN and len(picked) < n:
+    while len(out) < slots and len(picked) < n:
         if i % n not in picked:
             picked.add(i % n)
-            out.append(QUERIES[i % n])
+            out.append(rest[i % n])
         i += step
-    return out
+    return priority + out
 
 
 def pick_listings(payload):
@@ -184,33 +208,42 @@ def search():
     queries = query_slice()
     found, credits, failed = {}, None, 0
     for query in queries:
-        try:
-            payload = call(
-                SEARCH_API,
-                {
-                    "query": query,
-                    "lat": LAT,
-                    "lng": LNG,
-                    "radius_km": RADIUS_KM,
-                    "max_price": MAX_PRICE,
-                    "sort_by": "creation_time_descend",
-                    "date_listed": "last_7_days",
-                    "availability": "available",
-                },
-            )
-        except Exception as exc:
-            # One sick query must not cost us the other queries' results.
-            print(f"  query {query!r} FAILED: {exc}")
-            failed += 1
-            continue
-        listings = pick_listings(payload)
-        if isinstance(payload, dict):
+        cursor, pages, got = None, 0, 0
+        while pages < max(1, PAGES_PER_QUERY):
+            params = {
+                "query": query,
+                "lat": LAT,
+                "lng": LNG,
+                "radius_km": RADIUS_KM,
+                "max_price": MAX_PRICE,
+                "sort_by": "creation_time_descend",
+                "date_listed": DATE_LISTED,
+                "availability": "available",
+            }
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                payload = call(SEARCH_API, params)
+            except Exception as exc:
+                # One sick query must not cost us the other queries' results.
+                print(f"  query {query!r} page {pages + 1} FAILED: {exc}")
+                if pages == 0:
+                    failed += 1
+                break
+            listings = pick_listings(payload)
+            got += len(listings)
+            pages += 1
+            for listing in listings:
+                if listing.get("id"):
+                    found.setdefault(str(listing["id"]), listing)
+            if not isinstance(payload, dict):
+                break
             credits = payload.get("credits_remaining", credits)
-        for listing in listings:
-            if listing.get("id"):
-                found.setdefault(str(listing["id"]), listing)
-        print(f"  query {query!r}: {len(listings)}")
-    if failed == len(queries):
+            cursor = payload.get("cursor")
+            if not payload.get("has_next_page") or not cursor:
+                break
+        print(f"  query {query!r}: {got} over {pages} page(s)")
+    if queries and failed == len(queries):
         raise RuntimeError(f"all {failed} queries failed")
     print(f"{len(found)} unique from {queries}, credits left: {credits}")
     return list(found.values())
@@ -366,29 +399,49 @@ def triage(listings, get_detail=None):
     return alerts, skips
 
 
-def save(seen):
-    SEEN.write_text(json.dumps(sorted(seen)))
+def slim(listing):
+    """Only what card() and triage() read. The raw dict is mostly photo CDN URLs, and
+    this file is rewritten and committed every run."""
+    return {
+        "id": str(listing.get("id") or ""),
+        "title": listing.get("title"),
+        "url": listing.get("url"),
+        "price": {"formatted_amount": (listing.get("price") or {}).get("formatted_amount")},
+        "location": {"display_name": (listing.get("location") or {}).get("display_name")},
+    }
+
+
+def load_json(path, fallback):
+    if not path.exists():
+        return fallback
+    try:
+        return json.loads(path.read_text())
+    except ValueError:
+        print(f"{path.name} unreadable, starting fresh")
+        return fallback
 
 
 def main():
-    first_run = not SEEN.exists()
-    seen = set() if first_run else set(json.loads(SEEN.read_text()))
+    seen = set(load_json(SEEN, []))
+    # Already vetted on an earlier run; anything since alerted is dropped.
+    pending = [
+        l for l in load_json(PENDING, [])
+        if str(l.get("id") or "") and str(l["id"]) not in seen
+    ]
+    known = seen | {str(l["id"]) for l in pending}
 
-    fresh = new_ids(search(), seen)
-
-    if first_run:
-        # ponytail: seed silently so run #1 doesn't dump every standing listing at you
-        save(seen | {str(l["id"]) for l in fresh})
-        print(f"seeded {len(fresh)} existing listings, no alerts sent")
-        return
-
+    fresh = [l for l in search() if str(l.get("id") or "") and str(l["id"]) not in known]
     queue, skips = shortlist(fresh)
-    batch = queue[:MAX_ALERTS] if MAX_ALERTS > 0 else queue
-    deferred = len(queue) - len(batch)
+
+    # Re-rank the whole backlog each run, so a bike that advertises a trade jumps
+    # ahead of stock that has merely been waiting longer.
+    pool = pending + queue
+    pool.sort(key=lambda l: trade_signal(l.get("title"))[0] != "yes")
+    batch = pool[:MAX_ALERTS] if MAX_ALERTS > 0 else pool
+    held = pool[len(batch):]
 
     alerts, more_skips = triage(batch)
-    skips += more_skips
-    for listing, why in skips:
+    for listing, why in skips + more_skips:
         print(f"skip {listing['id']} ({why}): {listing.get('title')}")
         seen.add(str(listing["id"]))
 
@@ -396,19 +449,23 @@ def main():
     try:
         for is_hot, listing, info, hit in alerts:
             notify(card(listing, info, hit))
-            # Recorded only after the send lands, so a rate-limit crash re-alerts the
-            # stragglers next run instead of burying them as already-seen.
+            # Recorded only after the send lands, so a rate-limit crash re-queues the
+            # stragglers instead of burying them as already-seen.
             seen.add(str(listing["id"]))
             sent += 1
             hot += bool(is_hot)
             time.sleep(SEND_DELAY)
     finally:
-        save(seen)
+        SEEN.write_text(json.dumps(sorted(seen)))
+        # Anything neither sent nor skipped goes back in the queue, including the
+        # tail of a batch that died mid-send.
+        leftover = [slim(l) for l in batch + held if str(l["id"]) not in seen]
+        PENDING.write_text(json.dumps(leftover))
 
-    print(f"{len(fresh)} new, {sent} sent ({hot} trade-friendly), {len(skips)} skipped")
-    if deferred:
-        # Never silently truncate: these are still unseen and will come next run.
-        print(f"{deferred} held for later runs (cap {MAX_ALERTS}/run)")
+    print(
+        f"{len(fresh)} new, {sent} sent ({hot} trade-friendly), "
+        f"{len(skips) + len(more_skips)} skipped, {len(leftover)} queued"
+    )
 
 
 def selftest():
@@ -469,13 +526,6 @@ def selftest():
     assert [a[1]["id"] for a in alerts] == ["y", "n"], alerts
     assert more == []
 
-    # rotation: right size, no repeats in a run, and every query comes round
-    assert len(query_slice()) == min(QUERIES_PER_RUN, len(QUERIES))
-    assert len(set(query_slice(5))) == len(query_slice(5))
-    cycled = set()
-    for h in range(len(QUERIES)):
-        cycled |= set(query_slice(h))
-    assert cycled == set(QUERIES), sorted(set(QUERIES) - cycled)
     # the junk-query brands are gone from QUERIES but still recognised in REQUIRE
     assert "rawrr" not in QUERIES and rejected("Rawrr Mantis 2024") is None
     assert rejected("Arc'teryx MANTIS 1 WAIST PACK") == "not a known model"
@@ -504,69 +554,97 @@ def selftest():
     assert "…" in card({"title": "t"}, {"description": "x" * (DESC_CHARS + 50)})
     assert "<b>" in card({})                                   # survives an empty listing
 
+    priority_query_check()
     crash_safety_check()
     cap_defer_check()
     print("ok")
 
 
-def cap_defer_check():
-    """Listings over the per-run cap must be held, not dropped: they stay unseen."""
-    import tempfile
+class _sandbox:
+    """Point the state files at a temp dir and stub the network for one main() run."""
 
-    global SEEN, SEND_DELAY, MAX_ALERTS
-    keep = (SEEN, SEND_DELAY, MAX_ALERTS, globals()["search"], globals()["detail"], globals()["notify"])
-    try:
-        SEEN = pathlib.Path(tempfile.mkdtemp()) / "seen.json"
-        SEEN.write_text("[]")
-        SEND_DELAY, MAX_ALERTS = 0, 1
-        globals()["search"] = lambda: [
-            {"id": "a", "title": "Surron Light Bee X"},
-            {"id": "b", "title": "Talaria Sting"},
-            {"id": "c", "title": "79Bike Falcon"},
-        ]
+    def __init__(self, listings, notify_fn, max_alerts=6):
+        self.listings, self.notify_fn, self.max_alerts = listings, notify_fn, max_alerts
+
+    def __enter__(self):
+        import tempfile
+
+        global SEEN, PENDING, SEND_DELAY, MAX_ALERTS
+        self.keep = (SEEN, PENDING, SEND_DELAY, MAX_ALERTS,
+                     globals()["search"], globals()["detail"], globals()["notify"])
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        SEEN, PENDING = tmp / "seen.json", tmp / "pending.json"
+        SEND_DELAY, MAX_ALERTS = 0, self.max_alerts
+        globals()["search"] = lambda: self.listings
         globals()["detail"] = lambda _id: {}
-        globals()["notify"] = lambda text, tries=4: None
+        globals()["notify"] = self.notify_fn
+        return self
+
+    def state(self):
+        return (set(load_json(SEEN, [])),
+                {str(l["id"]) for l in load_json(PENDING, [])})
+
+    def __exit__(self, *exc):
+        global SEEN, PENDING, SEND_DELAY, MAX_ALERTS
+        SEEN, PENDING, SEND_DELAY, MAX_ALERTS = self.keep[:4]
+        globals()["search"], globals()["detail"], globals()["notify"] = self.keep[4:]
+        return False
+
+
+def cap_defer_check():
+    """Listings over the per-run cap must be queued, not dropped."""
+    bikes = [
+        {"id": "a", "title": "Surron Light Bee X"},
+        {"id": "b", "title": "Talaria Sting"},
+        {"id": "c", "title": "79Bike Falcon"},
+    ]
+    with _sandbox(bikes, lambda text, tries=4: None, max_alerts=1) as box:
         main()
-        saved = set(json.loads(SEEN.read_text()))
-        assert len(saved) == 1, saved     # two held back, still eligible next run
-    finally:
-        SEEN, SEND_DELAY, MAX_ALERTS = keep[0], keep[1], keep[2]
-        globals()["search"], globals()["detail"], globals()["notify"] = keep[3], keep[4], keep[5]
+        seen, pending = box.state()
+        assert len(seen) == 1, seen
+        assert len(pending) == 2, pending          # queued, not lost
+        assert not (seen & pending)                # and never in both
+
+        # next run sends the next one and re-queues the rest
+        main()
+        seen2, pending2 = box.state()
+        assert len(seen2) == 2 and len(pending2) == 1, (seen2, pending2)
 
 
 def crash_safety_check():
-    """A send that fails must leave that listing unseen, so the next run retries it."""
-    import tempfile
+    """A send that fails must leave that listing queued, not marked seen."""
+    bikes = [
+        {"id": "a", "title": "Surron Light Bee X"},
+        {"id": "b", "title": "Talaria Sting"},
+    ]
+    sends = []
 
-    global SEEN, SEND_DELAY
-    keep = (SEEN, SEND_DELAY, globals()["search"], globals()["detail"], globals()["notify"])
-    try:
-        SEEN = pathlib.Path(tempfile.mkdtemp()) / "seen.json"
-        SEEN.write_text("[]")          # exists, so not a seeding run
-        SEND_DELAY = 0
-        globals()["search"] = lambda: [
-            {"id": "a", "title": "Surron Light Bee X"},
-            {"id": "b", "title": "Talaria Sting"},
-        ]
-        globals()["detail"] = lambda _id: {}
+    def flaky(text, tries=4):
+        sends.append(text)
+        if len(sends) == 2:
+            raise RuntimeError("telegram down")
 
-        sends = []
-
-        def flaky(text, tries=4):
-            sends.append(text)
-            if len(sends) == 2:
-                raise RuntimeError("telegram down")
-
-        globals()["notify"] = flaky
+    with _sandbox(bikes, flaky) as box:
         try:
             main()
         except RuntimeError:
             pass
-        saved = set(json.loads(SEEN.read_text()))
-        assert saved == {"a"}, saved    # "b" never sent, so it must not be recorded
-    finally:
-        SEEN, SEND_DELAY = keep[0], keep[1]
-        globals()["search"], globals()["detail"], globals()["notify"] = keep[2], keep[3], keep[4]
+        seen, pending = box.state()
+        assert seen == {"a"}, seen                 # only the delivered one
+        assert pending == {"b"}, pending           # the failed one waits its turn
+
+
+def priority_query_check():
+    """Priority brands run every hour; the rest still all come round."""
+    for h in range(24):
+        picked = query_slice(h)
+        assert len(picked) == len(set(picked))
+        for q in PRIORITY_QUERIES:
+            assert q in picked, (h, picked)
+    covered = set()
+    for h in range(24):
+        covered |= set(query_slice(h))
+    assert covered == set(QUERIES) | set(PRIORITY_QUERIES), covered
 
 
 if __name__ == "__main__":
