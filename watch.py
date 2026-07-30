@@ -96,6 +96,10 @@ REQUIRE = [
         # comparable premium makes only. Deliberately NOT here: razor mx, ridstar,
         # valtinsu, rooder, kukirin, weped, heybike, emmo, gt54, zoombike, phatmoto,
         # sozo, m2s, ebroh — those are scooters, kids' toys and fat-tire commuters.
+        # yozma is out too, confirmed by the owner: a "Black yozma in10" was rejected
+        # despite its title shouting SEND OFFERS OR TRADES, and that is the wanted
+        # outcome — it is a small ~CA$2k bike, not this class. Trade-willingness does
+        # not override the class filter.
         # "electric motion" is out despite being a real premium brand: it matched
         # "2023 Electric Motion Sport", a red Chinese e-street-bike. Their model name
         # is the precise token.
