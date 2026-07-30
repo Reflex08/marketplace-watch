@@ -34,6 +34,8 @@ jobs:
           LNG: "-79.4111"
           RADIUS_KM: "100"
           MAX_PRICE: "15000"
+          QUERIES_PER_RUN: "3"
+          MAX_ALERTS: "6"
           PITCH: "Hey! Any interest in trading your bike for my go-kart? Runs great, can send pics and video of it going. Happy to add cash on top if needed."
       - name: persist seen state
         run: |

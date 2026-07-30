@@ -9,18 +9,33 @@ the scraping happens on ScrapeCreators' infrastructure, so your account is never
 
 ## How it decides
 
-1. **Search** every brand in `QUERIES` (1 credit each). Results rotate and any single query can
-   return 0, so several queries run every time and get deduped by listing id.
-2. **Title filter.** Must match a brand or model in `REQUIRE`, must not match a part word in
-   `EXCLUDE`. This runs before any paid detail call. The allowlist exists because the API
-   keyword-matches loosely — `ventus` otherwise returns golf shafts and `rawrr` returns sweaters.
-3. **Read the description** for survivors (1 credit each) to judge trade intent.
-4. **Drop refusers** — anything saying "no trades", "cash only", etc. (`NO_TRADE`).
-5. **Rank.** Sellers saying "trades welcome", "swap", "trade for" (`TRADE_OK`) are flagged 🔥 and
-   sent first. Everyone else follows.
+1. **Search** `QUERIES_PER_RUN` of the brands in `QUERIES`, striding through the list so each run
+   samples a spread and every query comes round every few hours. 1 credit each. A query that fails
+   is logged and skipped; the run only dies if *all* of them fail.
+2. **Free title pass** (`shortlist`). Must match a brand or model in `REQUIRE`, must not match a
+   part word in `EXCLUDE`, must not already say "no trades"/"cash only" in the title. No credits
+   spent here — typically 80% of results die at this step. Survivors are ordered so titles already
+   advertising a trade go first.
+3. **Cap at `MAX_ALERTS`.** The rest are *held*, not dropped: they stay unseen and arrive on later
+   runs. This is what keeps the standing inventory arriving as a trickle instead of 50 at once.
+4. **Read the description** for that batch only (1 credit each) to judge trade intent.
+5. **Drop refusers**, then **rank** — sellers saying "trades welcome", "swap", "trade for"
+   (`TRADE_OK`) are flagged 🔥 and sent first.
 
-Junk-word matching is title-only on purpose: real listings mention batteries and tires in their
-descriptions constantly, so judging on description would drop the genuine bikes and keep the parts.
+Two deliberate asymmetries:
+
+- Junk matching is **title-only**. Real listings mention batteries and tires in their descriptions
+  constantly, so judging on description would drop the genuine bikes and keep the parts.
+- `NO_TRADE` is checked **before** `TRADE_OK`, because "no trades" contains "trade" and would
+  otherwise be promoted instead of dropped.
+
+Allowlist entries are qualified wherever the bare word is a common noun — `strike shadow` not
+`strike`, `onyx rcr` not `onyx` — and `mantis` was removed outright because it matches Arc'teryx
+packs and a Marvel action figure.
+
+A listing is recorded as seen only after its alert is actually delivered, so a crash or rate-limit
+mid-run re-alerts the stragglers next time rather than burying them. If a run fails outright it
+sends you a ⚠️ message and turns the Actions job red.
 
 ## Setup
 
@@ -38,12 +53,18 @@ The `seen.json` commit each run also keeps the schedule alive; GitHub disables c
 
 ## Tuning
 
-Everything is an env var in `.github/workflows/watch.yml` — `QUERIES`, `REQUIRE`, `EXCLUDE`,
-`NO_TRADE`, `TRADE_OK`, `MAX_PRICE`, `RADIUS_KM`, `PITCH`. Add brands to `QUERIES` *and* `REQUIRE`
-together, or the allowlist will reject them.
+Everything is an env var in `.github/workflows/watch.yml` — `QUERIES`, `QUERIES_PER_RUN`,
+`MAX_ALERTS`, `REQUIRE`, `EXCLUDE`, `NO_TRADE`, `TRADE_OK`, `MAX_PRICE`, `RADIUS_KM`, `SEND_DELAY`,
+`PITCH`. Add brands to `QUERIES` *and* `REQUIRE` together, or the allowlist will reject its own
+results.
 
-Cost is roughly 10 credits per run for searches plus 1 per new candidate, so ~250-300/day hourly.
-Halve it with `cron: "0 */2 * * *"`.
+Cost per run is `QUERIES_PER_RUN` credits plus at most `MAX_ALERTS` — 3 + up to 6 on the defaults,
+so ~72/day steady-state once the standing inventory has been worked through. Levers, cheapest first:
+raise the cron interval, lower `QUERIES_PER_RUN`, lower `MAX_ALERTS`.
+
+`altis motors`, `rawrr` and `ventus` are intentionally not in `QUERIES` — over several live runs they
+returned only sneakers, hockey cards and golf shafts. The brands remain in `REQUIRE`, so a genuine
+one still gets caught via the other queries. Re-add them if you want the direct coverage.
 
 ## Local run
 

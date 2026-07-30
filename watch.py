@@ -21,8 +21,11 @@ QUERIES = [
     q.strip()
     for q in os.environ.get(
         "QUERIES",
+        # "altis motors", "rawrr" and "ventus" are deliberately absent: across several
+        # live runs they returned only sneakers, hockey cards and golf shafts. Those
+        # brands stay in REQUIRE, so a real one still gets caught by the other queries.
         "surron,talaria,e ride pro,79bike,rfn apollo,segway dirt bike,"
-        "electric dirt bike,altis motors,rawrr,ventus",
+        "electric dirt bike",
     ).split(",")
     if q.strip()
 ]
@@ -46,14 +49,16 @@ REQUIRE = [
         # the brands you named
         "surron,sur-ron,sur ron,talaria,e ride pro,eride pro,e-ride pro,eride,"
         "altis,rawrr,79bike,79 bike,ventus,rfn,apollo,segway,"
-        # their models
-        "light bee,lightbee,ultra bee,storm bee,lbx,sting,mantis,mx3,mx4,mx5,"
-        "x3,3x,falcon,warthog,xxx,"
-        # other electric dirt bike makes that show up on Marketplace
-        "kuberg,onyx,volcon,stark varg,delfast,dust moto,kalk,razor mx,ridstar,"
-        "valtinsu,gt54,gt73,gt7,emmo,rooder,evoque,arctic leopard,sozo,m2s,zoombike,"
-        "electric motion,bultaco,flux,phatmoto,venom,ebroh,nitro,tromox,"
-        "strike,shadow sx,heybike,villain,yozma,kukirin,weped,emoto,e-moto,e moto,"
+        # their models. Bare "mantis" is out: it matches Arc'teryx Mantis packs and a
+        # Marvel action figure. Bare "3x" is out: it matches clothing sized 3XL.
+        "light bee,lightbee,ultra bee,storm bee,lbx,sting,mx3,mx4,mx5,"
+        "falcon,warthog,"
+        # other electric dirt bike makes that show up on Marketplace. Each is qualified
+        # where the bare word is a common English noun (strike, onyx, villain, venom).
+        "kuberg,onyx rcr,volcon,stark varg,delfast,dust moto,kalk,razor mx,ridstar,"
+        "valtinsu,gt54,gt73,emmo,rooder,evoque,arctic leopard,sozo,m2s,zoombike,"
+        "electric motion,bultaco,phatmoto,ebroh,tromox,"
+        "strike shadow,shadow sx,heybike,yozma,kukirin,weped,emoto,e-moto,e moto,"
         # generic phrasing, for makes not listed above
         "electric dirt bike,electric dirtbike,e dirt bike,edirt,dirt ebike,"
         "dirt e-bike,electric motocross,electric enduro,electric pit bike,"
@@ -102,19 +107,64 @@ TRADE_OK = [
 DESC_CHARS = int(os.environ.get("DESC_CHARS", "400"))
 SEND_DELAY = float(os.environ.get("SEND_DELAY", "1.2"))  # Telegram allows ~1 msg/sec per chat
 
+# Searching every brand every hour costs 10 credits a run for no benefit — new bikes
+# in this class appear a few times a week. Rotate a few per run instead; each query
+# still gets checked several times a day. 0 disables rotation.
+QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "3"))
 
-def call(url, params):
-    r = requests.get(
-        url,
-        headers={"x-api-key": os.environ["SCRAPECREATORS_KEY"]},
-        params=params,
-        timeout=60,
-    )
-    r.raise_for_status()
-    payload = r.json()
-    if isinstance(payload, dict) and payload.get("success") is False:
-        raise RuntimeError(f"api call failed: {payload}")  # else it reads as "nothing found"
-    return payload
+# Alerts per run. Caps the detail spend and, more importantly, means the standing
+# inventory arrives as a trickle rather than 50 messages at once. Overflow is not
+# dropped — it stays unseen and comes on later runs, newest and trade-friendly first.
+MAX_ALERTS = int(os.environ.get("MAX_ALERTS", "6"))
+
+
+def call(url, params, tries=3):
+    """Retries transient failures. A 4xx or an explicit success:false raises at once."""
+    for attempt in range(tries):
+        try:
+            r = requests.get(
+                url,
+                headers={"x-api-key": os.environ["SCRAPECREATORS_KEY"]},
+                params=params,
+                timeout=60,
+            )
+            if r.status_code >= 500:
+                raise requests.HTTPError(f"upstream {r.status_code}")
+            r.raise_for_status()
+            payload = r.json()
+        except (requests.RequestException, ValueError) as exc:
+            if attempt == tries - 1:
+                raise
+            wait = 2 ** attempt
+            print(f"    retrying in {wait}s after {exc}")
+            time.sleep(wait)
+            continue
+        if isinstance(payload, dict) and payload.get("success") is False:
+            raise RuntimeError(f"api call failed: {payload}")  # else it reads as "nothing found"
+        return payload
+
+
+def query_slice(hour=None):
+    """The queries to run this hour, cycling so every query comes round regularly.
+
+    Strides across the list rather than taking a contiguous block: neighbouring
+    queries tend to be similar, so a block can spend a whole run on one weak
+    corner of the list while a stride always samples a spread.
+    """
+    n = len(QUERIES)
+    if QUERIES_PER_RUN <= 0 or QUERIES_PER_RUN >= n:
+        return list(QUERIES)
+    if hour is None:
+        hour = int(time.time() // 3600)
+    step = max(1, n // QUERIES_PER_RUN)
+    picked, out = set(), []
+    i = hour % n
+    while len(out) < QUERIES_PER_RUN and len(picked) < n:
+        if i % n not in picked:
+            picked.add(i % n)
+            out.append(QUERIES[i % n])
+        i += step
+    return out
 
 
 def pick_listings(payload):
@@ -130,22 +180,29 @@ def pick_listings(payload):
 
 
 def search():
-    """Every query, deduped by listing id. One credit per query."""
-    found, credits = {}, None
-    for query in QUERIES:
-        payload = call(
-            SEARCH_API,
-            {
-                "query": query,
-                "lat": LAT,
-                "lng": LNG,
-                "radius_km": RADIUS_KM,
-                "max_price": MAX_PRICE,
-                "sort_by": "creation_time_descend",
-                "date_listed": "last_7_days",
-                "availability": "available",
-            },
-        )
+    """This run's queries, deduped by listing id. One credit per query."""
+    queries = query_slice()
+    found, credits, failed = {}, None, 0
+    for query in queries:
+        try:
+            payload = call(
+                SEARCH_API,
+                {
+                    "query": query,
+                    "lat": LAT,
+                    "lng": LNG,
+                    "radius_km": RADIUS_KM,
+                    "max_price": MAX_PRICE,
+                    "sort_by": "creation_time_descend",
+                    "date_listed": "last_7_days",
+                    "availability": "available",
+                },
+            )
+        except Exception as exc:
+            # One sick query must not cost us the other queries' results.
+            print(f"  query {query!r} FAILED: {exc}")
+            failed += 1
+            continue
         listings = pick_listings(payload)
         if isinstance(payload, dict):
             credits = payload.get("credits_remaining", credits)
@@ -153,7 +210,9 @@ def search():
             if listing.get("id"):
                 found.setdefault(str(listing["id"]), listing)
         print(f"  query {query!r}: {len(listings)}")
-    print(f"{len(found)} unique across {len(QUERIES)} queries, credits left: {credits}")
+    if failed == len(queries):
+        raise RuntimeError(f"all {failed} queries failed")
+    print(f"{len(found)} unique from {queries}, credits left: {credits}")
     return list(found.values())
 
 
@@ -269,18 +328,36 @@ def new_ids(listings, seen):
     return out
 
 
-def triage(fresh, get_detail=None):
-    """(sorted alerts, skip log). Trade-friendly first; explicit refusers dropped."""
-    get_detail = get_detail or detail   # resolved here, not at def time, so it's swappable
-    alerts, skips = [], []
+def shortlist(fresh):
+    """Free title-only pass: (queue, skips). Costs no credits.
+
+    Anything decided by the title alone is decided here, before a single paid
+    detail call. Survivors are ordered so titles that already advertise a trade
+    get read first, which is what the per-run cap then takes from.
+    """
+    queue, skips = [], []
     for listing in fresh:
         title = listing.get("title")
         nope = rejected(title)
         if nope:
             skips.append((listing, nope))
             continue
-        info = get_detail(listing["id"])  # credit spent only past the title filter
-        verdict, phrase = trade_signal(title, info.get("description"))
+        verdict, phrase = trade_signal(title)
+        if verdict == "no":
+            skips.append((listing, f"refuses:{phrase}"))
+            continue
+        queue.append((verdict != "yes", listing))   # False sorts first
+    queue.sort(key=lambda q: q[0])
+    return [listing for _, listing in queue], skips
+
+
+def triage(listings, get_detail=None):
+    """(alerts sorted trade-first, skips). Titles must already be vetted by shortlist."""
+    get_detail = get_detail or detail   # resolved here, not at def time, so it's swappable
+    alerts, skips = [], []
+    for listing in listings:
+        info = get_detail(listing["id"])   # the one paid call per listing
+        verdict, phrase = trade_signal(listing.get("title"), info.get("description"))
         if verdict == "no":
             skips.append((listing, f"refuses:{phrase}"))
             continue
@@ -305,7 +382,12 @@ def main():
         print(f"seeded {len(fresh)} existing listings, no alerts sent")
         return
 
-    alerts, skips = triage(fresh)
+    queue, skips = shortlist(fresh)
+    batch = queue[:MAX_ALERTS] if MAX_ALERTS > 0 else queue
+    deferred = len(queue) - len(batch)
+
+    alerts, more_skips = triage(batch)
+    skips += more_skips
     for listing, why in skips:
         print(f"skip {listing['id']} ({why}): {listing.get('title')}")
         seen.add(str(listing["id"]))
@@ -322,7 +404,11 @@ def main():
             time.sleep(SEND_DELAY)
     finally:
         save(seen)
+
     print(f"{len(fresh)} new, {sent} sent ({hot} trade-friendly), {len(skips)} skipped")
+    if deferred:
+        # Never silently truncate: these are still unseen and will come next run.
+        print(f"{deferred} held for later runs (cap {MAX_ALERTS}/run)")
 
 
 def selftest():
@@ -365,17 +451,36 @@ def selftest():
     assert trade_signal("plain ebike", "good condition") == (None, None)
     assert trade_signal(None, None) == (None, None)
 
-    # trade-friendly sorts ahead of neutral, refusers and junk never appear
+    # free title pass drops junk and refusers, and promotes advertised trades
     fresh = [
         {"id": "n", "title": "2024 Talaria Sting"},
         {"id": "x", "title": "Fujikura Ventus shaft"},
         {"id": "y", "title": "Surron Light Bee X", "price": {"formatted_amount": "CA$6,099"}},
         {"id": "r", "title": "Sur-Ron Ultra Bee cash only"},
+        {"id": "t", "title": "79Bike Falcon - open to trades"},
     ]
-    details = {"n": {}, "y": {"description": "trades welcome"}, "r": {}}
-    alerts, skips = triage(fresh, get_detail=lambda i: details.get(i, {}))
-    assert [a[1]["id"] for a in alerts] == ["y", "n"], alerts
+    queue, skips = shortlist(fresh)
+    assert [l["id"] for l in queue] == ["t", "n", "y"], queue   # advertised trade first
     assert sorted(s[1].split(":")[0] for s in skips) == ["part", "refuses"]
+
+    # detail pass finds the trade offer that was only in the description
+    details = {"n": {}, "y": {"description": "trades welcome"}}
+    alerts, more = triage([fresh[0], fresh[2]], get_detail=lambda i: details.get(i, {}))
+    assert [a[1]["id"] for a in alerts] == ["y", "n"], alerts
+    assert more == []
+
+    # rotation: right size, no repeats in a run, and every query comes round
+    assert len(query_slice()) == min(QUERIES_PER_RUN, len(QUERIES))
+    assert len(set(query_slice(5))) == len(query_slice(5))
+    cycled = set()
+    for h in range(len(QUERIES)):
+        cycled |= set(query_slice(h))
+    assert cycled == set(QUERIES), sorted(set(QUERIES) - cycled)
+    # the junk-query brands are gone from QUERIES but still recognised in REQUIRE
+    assert "rawrr" not in QUERIES and rejected("Rawrr Mantis 2024") is None
+    assert rejected("Arc'teryx MANTIS 1 WAIST PACK") == "not a known model"
+    assert rejected("Marvel Legends Mantis action figure") == "not a known model"
+    assert rejected("Mens hoodie size 3XL") == "not a known model"
 
     hot = card(fresh[2], details["y"], "trades welcome")
     assert hot.startswith("🔥") and "OPEN TO TRADES" in hot
@@ -400,7 +505,33 @@ def selftest():
     assert "<b>" in card({})                                   # survives an empty listing
 
     crash_safety_check()
+    cap_defer_check()
     print("ok")
+
+
+def cap_defer_check():
+    """Listings over the per-run cap must be held, not dropped: they stay unseen."""
+    import tempfile
+
+    global SEEN, SEND_DELAY, MAX_ALERTS
+    keep = (SEEN, SEND_DELAY, MAX_ALERTS, globals()["search"], globals()["detail"], globals()["notify"])
+    try:
+        SEEN = pathlib.Path(tempfile.mkdtemp()) / "seen.json"
+        SEEN.write_text("[]")
+        SEND_DELAY, MAX_ALERTS = 0, 1
+        globals()["search"] = lambda: [
+            {"id": "a", "title": "Surron Light Bee X"},
+            {"id": "b", "title": "Talaria Sting"},
+            {"id": "c", "title": "79Bike Falcon"},
+        ]
+        globals()["detail"] = lambda _id: {}
+        globals()["notify"] = lambda text, tries=4: None
+        main()
+        saved = set(json.loads(SEEN.read_text()))
+        assert len(saved) == 1, saved     # two held back, still eligible next run
+    finally:
+        SEEN, SEND_DELAY, MAX_ALERTS = keep[0], keep[1], keep[2]
+        globals()["search"], globals()["detail"], globals()["notify"] = keep[3], keep[4], keep[5]
 
 
 def crash_safety_check():
@@ -439,4 +570,14 @@ def crash_safety_check():
 
 
 if __name__ == "__main__":
-    selftest() if "--selftest" in sys.argv else main()
+    if "--selftest" in sys.argv:
+        selftest()
+    else:
+        try:
+            main()
+        except Exception as exc:
+            try:
+                notify(f"⚠️ <b>watcher failed</b>\n{html.escape(str(exc)[:400])}")
+            except Exception:
+                pass          # Telegram itself may be what broke; the red run still tells him
+            raise
