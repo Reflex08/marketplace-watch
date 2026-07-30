@@ -131,11 +131,18 @@ REQUIRE = [
         # is the precise token.
         "kuberg,onyx rcr,volcon,stark varg,delfast,dust moto,kalk,epure,"
         "stealth electric,tromox,bultaco,strike shadow,shadow sx,gt73,evoque,"
-        "caofen,lynx,"
-        # generic phrasing, for makes not listed above. Bare "dirt bike" and "pit bike"
-        # are deliberately absent - they let gas bikes and CA$300 toys straight through.
-        "electric dirt bike,electric dirtbike,e dirt bike,dirt ebike,dirt e-bike,"
-        "electric motocross,electric enduro,electric pit bike,emx",
+        "caofen,lynx",
+        # No generic phrasing here on purpose. "electric dirt bike", "electric
+        # motocross", "e dirt bike" and friends used to sit in this list so unnamed
+        # makes could still get through. In practice they only admitted no-name stock -
+        # Yozma arrived that way three times - and every one cost a credit to read
+        # before being thrown out. The title must name a make or model.
+        #
+        # The cost: a genuine bike whose title says only "electric dirt bike 8000W",
+        # with the brand mentioned only in the description, is now rejected for free
+        # instead of read. That tail is the price of not paying for no-name stock.
+        # "electric dirt bike" stays in QUERIES - it is the highest-yield search term -
+        # it just no longer counts as a match on its own.
     ).split(",")
     if w.strip()
 ]
@@ -1179,7 +1186,7 @@ def selftest():
     )
     assert shop_alerts == [] and shop_skips[0][1] == "dealer:financing", (shop_alerts, shop_skips)
     # and caught for free from the title alone, before any paid call
-    free_q, free_s = shortlist([{"id": "d", "title": "ELECTRIC DIRT BIKE SALE - financing available"}])
+    free_q, free_s = shortlist([{"id": "d", "title": "SURRON LIGHT BEE SALE - financing available"}])
     assert free_q == [] and free_s[0][1].startswith("dealer:"), (free_q, free_s)
 
     # a new post with no trade mention still says so, and shows its age
@@ -1192,6 +1199,18 @@ def selftest():
     assert rejected("Arc'teryx MANTIS 1 WAIST PACK") == "not a known model"
     assert rejected("Marvel Legends Mantis action figure") == "not a known model"
     assert rejected("Mens hoodie size 3XL") == "not a known model"
+
+    # A make or model by name, or nothing. Generic phrasing used to match here and
+    # cost a credit per unnamed bike; "electric dirt bike" is still SEARCHED, it just
+    # no longer counts as a hit on its own.
+    for generic in ("Electric dirt bike 5000W brand new", "Electric dirtbike, adult size",
+                    "E dirt bike 72v fast", "Electric motocross bike", "emx bike cheap"):
+        assert rejected(generic) == "not a known model", generic
+    # Segway is deliberately absent: a live "no more segways" reply put it in EXCLUDE,
+    # so asserting it here would fail on your config and pass on a fresh install.
+    for named in ("Surron Light Bee X", "2024 Talaria Sting", "79Bike Falcon",
+                  "RFN Ares 8kw", "E Ride Pro S3"):
+        assert rejected(named) is None, named
 
     # every card is exactly 3 lines, states trade status, and carries no pitch text
     hot = card(
@@ -1287,10 +1306,12 @@ def selftest():
     assert [l["id"] for l in q] == ["ok", "noprice"], q          # unknown price passes
     assert s[0][1].startswith("under 2500"), s
 
-    # a generic title is allowed, but a CA$1,400 one still dies on price
-    assert rejected("Electric Dirt Bike") is None
-    gq, gs = shortlist([{"id": "g", "title": "Electric Dirt Bike", "price": {"amount": 1400}}])
-    assert gq == [] and "under 2500" in gs[0][1], (gq, gs)
+    # A generic title now dies on the name check, before price is even consulted. It
+    # used to be allowed through and caught only if it happened to be priced low, so
+    # an expensive no-name bike reached the paid description read.
+    assert rejected("Electric Dirt Bike") == "not a known model"
+    gq, gs = shortlist([{"id": "g", "title": "Electric Dirt Bike", "price": {"amount": 6400}}])
+    assert gq == [] and gs[0][1] == "not a known model", (gq, gs)
 
     retry_policy_check()
 
