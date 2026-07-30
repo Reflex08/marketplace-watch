@@ -24,6 +24,13 @@ jobs:
           python-version: "3.12"
       - run: pip install requests
       - run: python watch.py --selftest
+      # Read your Telegram replies and apply them BEFORE searching, so a correction
+      # takes effect on this run rather than the next one.
+      - run: python watch.py --feedback
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - run: python watch.py
         env:
           SCRAPECREATORS_KEY: ${{ secrets.SCRAPECREATORS_KEY }}
@@ -52,7 +59,7 @@ jobs:
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add seen.json pending.json
+          git add seen.json pending.json rules.json state.json
           git diff --quiet --cached || git commit -m "seen + pending state"
           git pull --rebase --autostash
           git push

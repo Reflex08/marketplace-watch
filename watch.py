@@ -20,9 +20,40 @@ SEEN = pathlib.Path(__file__).with_name("seen.json")
 # Vetted listings not yet alerted. Persisted because the cap defers more than it
 # sends, and a deferred listing found on page 3 won't reappear on tomorrow's page 1.
 PENDING = pathlib.Path(__file__).with_name("pending.json")
+# Written by `watch.py --feedback` from your Telegram replies. Overrides the env
+# defaults below, so every setting is adjustable by talking to the bot.
+RULES = pathlib.Path(__file__).with_name("rules.json")
+# Telegram cursor + message_id -> listing, so a reply can be tied to its alert.
+STATE = pathlib.Path(__file__).with_name("state.json")
+
+
+def load_json(path, fallback):
+    if not path.exists():
+        return fallback
+    try:
+        return json.loads(path.read_text())
+    except ValueError:
+        print(f"{path.name} unreadable, starting fresh")
+        return fallback
+
+
+_RULES = load_json(RULES, {})
+
+
+def tuned(name, base):
+    """A list from env, minus anything you've blocked, plus anything you've added."""
+    blocked = [w.lower() for w in _RULES.get(f"{name}_remove", [])]
+    out = [w for w in base if not any(b in w.lower() for b in blocked)]
+    return out + [w for w in _RULES.get(f"{name}_add", []) if w not in out]
+
+
+def tuned_num(name, base):
+    got = _RULES.get(name)
+    return type(base)(got) if got is not None else base
+
 
 # Each query returns a different rotating slice, so several widen coverage a lot.
-QUERIES = [
+QUERIES = tuned("queries", [
     q.strip()
     for q in os.environ.get(
         "QUERIES",
@@ -33,15 +64,15 @@ QUERIES = [
         "electric dirt bike",
     ).split(",")
     if q.strip()
-]
+])
 LAT = os.environ.get("LAT", "43.7615")   # North York, Toronto
 LNG = os.environ.get("LNG", "-79.4111")
-RADIUS_KM = os.environ.get("RADIUS_KM", "200")
-MAX_PRICE = os.environ.get("MAX_PRICE", "15000")
+RADIUS_KM = tuned_num("radius_km", float(os.environ.get("RADIUS_KM", "200")))
+MAX_PRICE = tuned_num("max_price", float(os.environ.get("MAX_PRICE", "15000")))
 # Sur-Ron / Talaria / E Ride Pro class starts around CA$3.5k used. Anything under this
 # is a scooter, a kids' toy or a fat-tire commuter wearing "dirt bike" in its title.
 # The API's own min_price leaks items well below it, so it is re-checked client-side.
-MIN_PRICE = float(os.environ.get("MIN_PRICE", "2500"))   # Sur-Ron/Talaria class runs CA$3.5k-10k
+MIN_PRICE = tuned_num("min_price", float(os.environ.get("MIN_PRICE", "2500")))
 # No pitch text: alerts carry the link and the trade status only. Writing the message
 # yourself, per seller, is also what keeps it from looking like a bot.
 
@@ -173,6 +204,53 @@ MAX_ALERTS = int(os.environ.get("MAX_ALERTS", "6"))
 # surron alone goes from 24 listings at 1 page to 79 at 4.
 PAGES_PER_QUERY = int(os.environ.get("PAGES_PER_QUERY", "1"))
 DATE_LISTED = os.environ.get("DATE_LISTED", "all")
+
+# Everything above is the baseline; rules.json — written by your Telegram replies —
+# gets the final say. Applied here in one place so no setting is accidentally
+# un-tunable, and so `--show` can print exactly what is in force.
+REQUIRE = tuned("require", REQUIRE)
+EXCLUDE = tuned("exclude", EXCLUDE)
+NO_TRADE = tuned("no_trade", NO_TRADE)
+DEALER = tuned("dealer", DEALER)
+TRADE_OK = tuned("trade_ok", TRADE_OK)
+PRIORITY_QUERIES = tuned("priority_queries", PRIORITY_QUERIES)
+NEW_HOURS = tuned_num("new_hours", NEW_HOURS)
+MAX_CHECKS = tuned_num("max_checks", MAX_CHECKS)
+MAX_ALERTS = tuned_num("max_alerts", MAX_ALERTS)
+QUERIES_PER_RUN = tuned_num("queries_per_run", QUERIES_PER_RUN)
+
+def apply_brands(queries, priority, require, exclude, rules=None):
+    """Blocking a brand must stop it being SEARCHED as well as sent, so the term is
+    stripped from the queries and the allowlist and added to the blocklist. "No more
+    segways" then costs nothing per run instead of one wasted credit."""
+    rules = _RULES if rules is None else rules
+    queries, priority = list(queries), list(priority)
+    require, exclude = list(require), list(exclude)
+
+    for brand in rules.get("brands_blocked", []):
+        b = str(brand).strip().lower()
+        if not b:
+            continue
+        queries = [q for q in queries if b not in q.lower()]
+        priority = [q for q in priority if b not in q.lower()]
+        require = [w for w in require if b not in w.lower()]
+        if b not in exclude:
+            exclude.append(b)
+
+    for brand in rules.get("brands_added", []):
+        b = str(brand).strip().lower()
+        if not b:
+            continue
+        if b not in queries:
+            queries.append(b)
+        if b not in require:
+            require.append(b)
+    return queries, priority, require, exclude
+
+
+QUERIES, PRIORITY_QUERIES, REQUIRE, EXCLUDE = apply_brands(
+    QUERIES, PRIORITY_QUERIES, REQUIRE, EXCLUDE
+)
 
 
 def call(url, params, tries=3):
@@ -440,7 +518,10 @@ def notify(text, tries=4):
             time.sleep(wait + 1)
             continue
         r.raise_for_status()
-        return
+        try:
+            return r.json()["result"]["message_id"]   # so a reply can be tied to it
+        except (ValueError, KeyError, TypeError):
+            return None
     raise RuntimeError("telegram rate limited on every attempt")
 
 
@@ -534,14 +615,228 @@ def slim(listing):
     }
 
 
-def load_json(path, fallback):
-    if not path.exists():
-        return fallback
-    try:
-        return json.loads(path.read_text())
-    except ValueError:
-        print(f"{path.name} unreadable, starting fresh")
-        return fallback
+def remember(message_id, listing):
+    """Keep message_id -> listing so a reply can name what it is about."""
+    state = load_json(STATE, {})
+    msgs = state.setdefault("messages", {})
+    msgs[str(message_id)] = {
+        "title": listing.get("title"),
+        "price": (listing.get("price") or {}).get("formatted_amount"),
+        "url": listing.get("url"),
+    }
+    # ponytail: keep the last 300; older alerts aren't going to get replied to
+    if len(msgs) > 300:
+        for key in sorted(msgs, key=int)[:-300]:
+            del msgs[key]
+    STATE.write_text(json.dumps(state))
+
+
+RULE_TOOL = {
+    "name": "adjust",
+    "description": "Apply one adjustment to the bike-watcher's filters, based on the user's "
+                   "feedback about a specific listing. Choose 'none' if the feedback is "
+                   "praise, a question, or too vague to act on safely.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "block_brand",     # stop searching for and stop sending this make
+                    "add_brand",       # start searching for and allow this make
+                    "block_word",      # reject listings whose title contains this
+                    "mark_dealer",     # treat this phrase as a commercial seller
+                    "mark_no_trade",   # treat this phrase as refusing trades
+                    "set_min_price",
+                    "set_max_price",
+                    "set_radius_km",
+                    "set_new_hours",
+                    "set_max_alerts",
+                    "none",
+                ],
+            },
+            "value": {
+                "type": "string",
+                "description": "The brand, phrase, or number. Lowercase for text. Keep text "
+                               "as short as possible while still being specific — one or two "
+                               "words. Never a whole listing title.",
+            },
+            "reply": {
+                "type": "string",
+                "description": "One short sentence, addressed to the user, confirming what "
+                               "changed. Plain language, no jargon.",
+            },
+        },
+        "required": ["action", "value", "reply"],
+    },
+}
+
+
+def interpret(feedback, listing):
+    """Turn a free-text reply into one filter change. Returns the tool input dict."""
+    context = (
+        f"Current settings:\n"
+        f"- searching for: {', '.join(QUERIES)}\n"
+        f"- price range: CA${MIN_PRICE:g} to CA${MAX_PRICE:g}\n"
+        f"- radius: {RADIUS_KM:g} km from North York, Toronto\n"
+        f"- counts as new: listed within {NEW_HOURS:g} hours\n"
+        f"- max alerts per run: {MAX_ALERTS}\n"
+    )
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": os.environ.get("FEEDBACK_MODEL", "claude-sonnet-5"),
+            "max_tokens": 400,
+            "system": (
+                "You tune a bot that watches Facebook Marketplace for high-performance "
+                "electric dirt bikes (Sur-Ron, Talaria, E Ride Pro, 79Bike and similar, "
+                "roughly CA$2500-15000) that the owner wants to trade a go-kart for.\n\n"
+                "He does NOT want: scooters, kids' toys, fat-tire commuter e-bikes, "
+                "electric street/sport bikes, gas bikes, parts, or dealer listings.\n\n"
+                "Turn his feedback into exactly ONE filter change via the adjust tool. "
+                "Prefer the narrowest change that fixes the complaint. Use block_word for "
+                "a product category or descriptor, block_brand for a make he wants gone "
+                "entirely. If the feedback is vague, positive, or you would have to guess "
+                "at a number, use action 'none' and say what you'd need to know.\n\n"
+                "CRITICAL: for mark_dealer and mark_no_trade the value must be the "
+                "commercial or refusal PHRASE that identifies the type of seller — "
+                "'financing', 'plus taxes', 'in stock', 'no trades'. NEVER a brand name, "
+                "model name or listing title: those are what he is shopping for, and "
+                "blocking one would hide every bike of that make. Same for block_word.\n\n"
+                + context
+            ),
+            "tools": [RULE_TOOL],
+            "tool_choice": {"type": "tool", "name": "adjust"},
+            "messages": [{
+                "role": "user",
+                "content": (
+                    f"Listing he is replying to:\n"
+                    f"  title: {listing.get('title')}\n"
+                    f"  price: {listing.get('price')}\n\n"
+                    f"His reply: {feedback}"
+                ),
+            }],
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
+    for block in r.json().get("content", []):
+        if block.get("type") == "tool_use":
+            return block["input"]
+    return None
+
+
+def apply_rule(rule):
+    """Write one adjustment into rules.json. Returns a human description, or None."""
+    action, value = rule.get("action"), str(rule.get("value", "")).strip()
+    if action in (None, "none") or not value:
+        return None
+
+    data = load_json(RULES, {})
+    lists = {
+        "block_brand": "brands_blocked",
+        "add_brand": "brands_added",
+        "block_word": "exclude_add",
+        "mark_dealer": "dealer_add",
+        "mark_no_trade": "no_trade_add",
+    }
+    numbers = {
+        "set_min_price": "min_price",
+        "set_max_price": "max_price",
+        "set_radius_km": "radius_km",
+        "set_new_hours": "new_hours",
+        "set_max_alerts": "max_alerts",
+    }
+
+    # Refuse any blocking rule whose text collides with a brand we are hunting.
+    # Observed live: "this guy is obviously a dealer" produced
+    # mark_dealer="talaria mx5 pro 72v" — the listing title. Had it produced
+    # "talaria", every Talaria would have been silently filtered out forever.
+    if action in ("block_word", "mark_dealer", "mark_no_trade"):
+        low = value.lower()
+        clash = next((w for w in REQUIRE if w in low or (len(w) > 4 and low in w)), None)
+        if clash:
+            print(f"refusing {action}={value!r}: would block the wanted brand {clash!r}")
+            return None
+
+    if action in lists:
+        key = lists[action]
+        bucket = data.setdefault(key, [])
+        if value.lower() in [str(x).lower() for x in bucket]:
+            return None                       # already set, don't churn the file
+        bucket.append(value.lower())
+    elif action in numbers:
+        try:
+            data[numbers[action]] = float(value.replace(",", "").replace("km", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+
+    RULES.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return f"{action} = {value}"
+
+
+def feedback():
+    """Read Telegram replies, convert each to a filter change, confirm back."""
+    state = load_json(STATE, {})
+    params = {"timeout": 0, "allowed_updates": '["message"]'}
+    if state.get("tg_offset"):
+        params["offset"] = state["tg_offset"]
+    r = requests.get(
+        f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/getUpdates",
+        params=params, timeout=45,
+    )
+    r.raise_for_status()
+    updates = r.json().get("result", [])
+    if not updates:
+        print("no replies")
+        return
+
+    msgs = state.get("messages", {})
+    applied = 0
+    for upd in updates:
+        state["tg_offset"] = upd["update_id"] + 1
+        msg = upd.get("message") or {}
+        text = (msg.get("text") or "").strip()
+        replied_to = (msg.get("reply_to_message") or {}).get("message_id")
+        if not text or text.startswith("/"):
+            continue
+        listing = msgs.get(str(replied_to), {}) if replied_to else {}
+        if not listing:
+            # A bare message with no reply is still usable — "no more segways" needs
+            # no listing context.
+            listing = {"title": "(no specific listing)", "price": ""}
+        try:
+            rule = interpret(text, listing)
+        except Exception as exc:
+            print(f"interpret failed: {exc}")
+            continue
+        what = apply_rule(rule) if rule else None
+        note = (rule or {}).get("reply") or "Nothing to change."
+        print(f"reply {text!r} -> {what or 'no change'}")
+        notify(("✅ " if what else "🤔 ") + html.escape(note))
+        applied += bool(what)
+
+    STATE.write_text(json.dumps(state))
+    print(f"{len(updates)} update(s), {applied} rule(s) applied")
+
+
+def show():
+    """Print what is actually in force, after rules.json overrides."""
+    print(f"searching   : {', '.join(QUERIES)}")
+    print(f"always      : {', '.join(PRIORITY_QUERIES)}  ({QUERIES_PER_RUN}/run)")
+    print(f"price       : CA${MIN_PRICE:g} - CA${MAX_PRICE:g}")
+    print(f"radius      : {RADIUS_KM:g} km")
+    print(f"new within  : {NEW_HOURS:g} h")
+    print(f"per run     : {MAX_CHECKS} checks, {MAX_ALERTS} alerts")
+    print(f"blocked     : {len(EXCLUDE)} words, {len(DEALER)} dealer phrases")
+    print(f"rules.json  : {json.dumps(_RULES, sort_keys=True) if _RULES else '(none yet)'}")
 
 
 def main():
@@ -578,7 +873,9 @@ def main():
     sent = hot = new = 0
     try:
         for wants, fresh, listing, info, hit in alerts:
-            notify(card(listing, info, hit))
+            mid = notify(card(listing, info, hit))
+            if mid:
+                remember(mid, listing)
             # Recorded only after the send lands, so a rate-limit crash re-queues the
             # stragglers instead of burying them as already-seen.
             seen.add(str(listing["id"]))
@@ -858,7 +1155,68 @@ def selftest():
     priority_query_check()
     crash_safety_check()
     cap_defer_check()
+    rules_check()
     print("ok")
+
+
+def rules_check():
+    """rules.json must override the baseline, and a blocked brand must stop being
+    searched as well as sent — otherwise "no more segways" still costs a credit."""
+    import tempfile
+
+    global RULES, _RULES
+    keep = (RULES, _RULES)
+    try:
+        RULES = pathlib.Path(tempfile.mkdtemp()) / "rules.json"
+
+        assert apply_rule({"action": "block_brand", "value": "Segway"}) is not None
+        assert apply_rule({"action": "block_brand", "value": "segway"}) is None   # no churn
+        assert apply_rule({"action": "set_radius_km", "value": "50 km"}) is not None
+        assert apply_rule({"action": "set_min_price", "value": "3,000"}) is not None
+        assert apply_rule({"action": "block_word", "value": "supermoto"}) is not None
+        assert apply_rule({"action": "none", "value": ""}) is None
+        assert apply_rule({"action": "set_min_price", "value": "cheap"}) is None  # unparseable
+        assert apply_rule({"action": "nonsense", "value": "x"}) is None
+
+        saved = json.loads(RULES.read_text())
+        assert saved["brands_blocked"] == ["segway"], saved
+        assert saved["radius_km"] == 50.0 and saved["min_price"] == 3000.0, saved
+        assert saved["exclude_add"] == ["supermoto"], saved
+
+        # a blocking rule must never be allowed to hide a brand we are hunting.
+        # "this guy is obviously a dealer" produced mark_dealer="talaria mx5 pro 72v"
+        # live; had it said "talaria", every Talaria would have vanished silently.
+        for bad in ["talaria", "Talaria MX5 Pro 72V", "surron", "sur-ron", "light bee"]:
+            assert apply_rule({"action": "mark_dealer", "value": bad}) is None, bad
+            assert apply_rule({"action": "block_word", "value": bad}) is None, bad
+            assert apply_rule({"action": "mark_no_trade", "value": bad}) is None, bad
+        # genuine commercial phrases still go through
+        assert apply_rule({"action": "mark_dealer", "value": "trade-in special"}) is not None
+        # and deliberately dropping a brand is still allowed, via block_brand
+        assert apply_rule({"action": "block_brand", "value": "talaria"}) is not None
+
+        # the override helpers read it back correctly
+        _RULES = saved
+        assert tuned_num("radius_km", 200.0) == 50.0
+        assert tuned_num("new_hours", 48.0) == 48.0                  # untouched stays
+        assert "supermoto" in tuned("exclude", ["parts"])
+
+        # a blocked brand leaves the queries, the allowlist AND enters the blocklist
+        qs, pri, req, exc = apply_brands(
+            ["surron", "segway dirt bike"], ["surron", "segway dirt bike"],
+            ["surron", "segway x1", "segway dirt"], ["parts"], rules=saved,
+        )
+        assert qs == ["surron"] and pri == ["surron"], (qs, pri)
+        assert req == ["surron"], req
+        assert "segway" in exc, exc
+
+        # adding a brand puts it in both places so it is searched and allowed
+        qs2, _, req2, _ = apply_brands(
+            ["surron"], ["surron"], ["surron"], [], rules={"brands_added": ["Kuberg"]},
+        )
+        assert qs2 == ["surron", "kuberg"] and req2 == ["surron", "kuberg"], (qs2, req2)
+    finally:
+        RULES, _RULES = keep
 
 
 def retry_policy_check():
@@ -993,6 +1351,10 @@ def priority_query_check():
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
+    elif "--show" in sys.argv:
+        show()
+    elif "--feedback" in sys.argv:
+        feedback()
     else:
         try:
             main()
