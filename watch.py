@@ -87,7 +87,7 @@ EXCLUDE = [
     for w in os.environ.get(
         "EXCLUDE",
         "for parts,parts only,parts,battery only,charger,key switch,switch,"
-        "sprocket,fender,decal,sticker,kickstand,helmet,cover,seat only,"
+        "sprocket,fender,decal,sticker,kickstand,helmet,cover,seat,shock,fork,"
         "plastics only,shaft,sweater,for rent,rental,"
         # gas machines — they reach the search via generic phrasing
         "cc ,50cc,70cc,110cc,125cc,140cc,150cc,160cc,200cc,250cc,450cc,"
@@ -334,6 +334,13 @@ def dealer_signal(*texts):
     return next((p for p in DEALER if p in blob), None)
 
 
+# Any surviving mention of trading counts. Safe as a catch-all precisely because
+# NO_TRADE is checked first and wins, so "no trades" can never reach this. Word
+# boundaries, so "trademark" doesn't count. This is what catches phrasings no
+# hand-written list would, e.g. "will take trades for Seadoos, Spark, Trixxs".
+TRADE_WORD = re.compile(r"\b(trade|trades|traded|trading|swap|swaps|swapping)\b")
+
+
 def trade_signal(*texts):
     """('no'|'yes'|None, matched phrase) — read from title AND description.
 
@@ -344,9 +351,12 @@ def trade_signal(*texts):
     for phrase in NO_TRADE:
         if phrase in blob:
             return "no", phrase
-    for phrase in TRADE_OK:
+    for phrase in TRADE_OK:          # specific phrases first, they read better in the alert
         if phrase in blob:
             return "yes", phrase
+    m = TRADE_WORD.search(blob)
+    if m:
+        return "yes", m.group(0)
     return None, None
 
 
@@ -638,6 +648,23 @@ def selftest():
     assert trade_signal("plain ebike", "good condition") == (None, None)
     assert trade_signal(None, None) == (None, None)
 
+    # phrasings no hand-written list would cover — the real listing that exposed this
+    # said "will take trades for Seadoos, Spark, Trixxs", and "trades for" is not a
+    # substring of "trade for"
+    john = "Talaria X3 Pro, we'll take trades for Seadoos, Spark, Trixxs. Can add cash on top."
+    assert trade_signal("Talaria x3 pro 2025", john)[0] == "yes", trade_signal("t", john)
+    for phrasing in [
+        "open to any trades", "swapping for a quad?", "would consider a swap",
+        "traded my last one", "trades considered", "TRADE?", "looking to trade up",
+    ]:
+        assert trade_signal("Surron LBX", phrasing)[0] == "yes", phrasing
+    # but a refusal still wins, and word boundaries hold
+    assert trade_signal("Surron", "no trades, will take trades for nothing")[0] == "no"
+    assert trade_signal("Surron", "registered trademark of Segway")[0] is None
+    # the quote shown gives the useful context, not just the bare word
+    _, hit = trade_signal("Talaria x3 pro", john)
+    assert "Seadoos" in snippet(john, hit), snippet(john, hit)
+
     # real listing 1357502152470801, verbatim — the refusal is in the last line,
     # after 500 characters of enthusiastic build notes
     real = (
@@ -785,6 +812,8 @@ def selftest():
         "Segway Ninebot MAX G3 Electric Scooter",
         "79 bike charger",
         "2022 Kawasaki KLX 230R Dirt Bike",
+        "Fastace rear shock for surron talaria",  # parts that carry a real brand name
+        "Talaria/Surron Seat",
     ]:
         assert rejected(junk) is not None, junk
 
