@@ -112,7 +112,8 @@ NO_TRADE = [
     for p in os.environ.get(
         "NO_TRADE",
         "no trades,no trade,not trade,not trading,no swap,no swaps,no trades please,"
-        "cash only,cash on pickup only,cash and pickup only,not interested in trade",
+        "cash only,cash on pickup only,cash and pickup only,not interested in trade,"
+        "cash in hand,cash deal only,no trade offers,trades not accepted",
     ).split(",")
     if p.strip()
 ]
@@ -543,6 +544,23 @@ def selftest():
     assert trade_signal("ebike", "open to trades for a dirt bike")[0] == "yes"
     assert trade_signal("plain ebike", "good condition") == (None, None)
     assert trade_signal(None, None) == (None, None)
+
+    # real listing 1357502152470801, verbatim — the refusal is in the last line,
+    # after 500 characters of enthusiastic build notes
+    real = (
+        "Ready to ride. Zero mechanical issues and the battery health is perfect. It is "
+        "sitting on upgraded rims and supermoto wheels, making it the perfect street setup."
+        "Tons of money into this build. It has a custom heavy-duty bash guard, an upgraded "
+        "foot lock, a custom foot brake setup, and a clean aftermarket ignition placement. "
+        "All the brakes are fresh and grab hard. Also completely wired up with custom rock "
+        "lights, a fender light, and wheelie lights that look crazy at night.Runs "
+        "flawlessly and needs absolutely nothing.\n\nAnd the forks alone r 2.1k\nAnd rear "
+        "shock is 1.7k\n\nNo trades or lowball offers. Serious buyers only. Cash in hand "
+        "if you want to test ride it."
+    )
+    assert trade_signal("2024 Sur-Ron Ultra Bee", real) == ("no", "no trades")
+    # and it must still refuse if the seller only says the cash part
+    assert trade_signal("Ultra Bee", "Cash in hand if you want to test ride it.")[0] == "no"
 
     # free title pass drops junk and refusers, and promotes advertised trades
     fresh = [
