@@ -52,7 +52,12 @@ def search():
         timeout=60,
     )
     r.raise_for_status()
-    return pick_listings(r.json())
+    payload = r.json()
+    if isinstance(payload, dict):
+        if payload.get("success") is False:
+            raise RuntimeError(f"search failed: {payload}")  # else it fails silently as "no listings"
+        print(f"credits left: {payload.get('credits_remaining', '?')}")
+    return pick_listings(payload)
 
 
 def card(listing):
