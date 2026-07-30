@@ -44,7 +44,10 @@ jobs:
           RADIUS_KM: "200"
           MAX_PRICE: "15000"
           MIN_PRICE: "2500"
-          PRIORITY_QUERIES: "surron,talaria"
+          # measured yield: "electric dirt bike" 4 in-class per 48, 79bike 3, surron 1,
+          # "e ride pro" and "rfn apollo" 0 — so the productive ones run every time and
+          # the weak ones take the single rotating slot
+          PRIORITY_QUERIES: "surron,talaria,electric dirt bike,79bike"
           QUERIES_PER_RUN: "5"
           PAGES_PER_QUERY: "1"
           DATE_LISTED: "all"

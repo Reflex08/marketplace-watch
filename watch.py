@@ -182,16 +182,22 @@ SEND_DELAY = float(os.environ.get("SEND_DELAY", "1.2"))  # Telegram allows ~1 ms
 
 # Queries that run every single time, no matter the rotation â€” the brands worth
 # knowing about within the hour rather than within three.
+# Measured yield per query over 48 listings each: "electric dirt bike" found 4
+# in-class bikes, "79bike" 3, "surron" 1, and "e ride pro" / "rfn apollo" none. The
+# generic phrase beats the brand names because it appears in every make's title, so
+# it runs every time alongside the two brands that matter most.
 PRIORITY_QUERIES = [
     q.strip()
-    for q in os.environ.get("PRIORITY_QUERIES", "surron,talaria").split(",")
+    for q in os.environ.get(
+        "PRIORITY_QUERIES", "surron,talaria,electric dirt bike,79bike"
+    ).split(",")
     if q.strip()
 ]
 
 # Total queries per run, priority ones first and the remainder rotated in. Searching
 # every brand every hour costs credits for no benefit â€” new bikes in this class appear
 # a few times a week. 0 means run everything every time.
-QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "5"))
+QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "5"))   # 4 priority + 1 rotated
 
 # Send a listing if it is NEW or if it MENTIONS A TRADE. Never if it refuses trades â€”
 # that check runs first and wins outright. "New" is read from the detail call's
