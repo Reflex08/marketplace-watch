@@ -3,7 +3,8 @@
     "segway"
   ],
   "exclude_add": [
-    "racing bike"
+    "racing bike",
+    "car"
   ],
   "radius_km": 200.0
 }
