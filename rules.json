@@ -6,5 +6,8 @@
     "racing bike",
     "car"
   ],
+  "no_trade_add": [
+    "obo"
+  ],
   "radius_km": 200.0
 }
