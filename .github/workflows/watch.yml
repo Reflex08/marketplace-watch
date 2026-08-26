@@ -39,7 +39,7 @@ jobs:
           TG_CHAT: ${{ secrets.TG_CHAT }}
           # altis motors / rawrr / ventus omitted on purpose — they return sneakers,
           # hockey cards and golf shafts. The brands stay in REQUIRE regardless.
-          QUERIES: "surron,talaria,e ride pro,79bike,rfn apollo,segway dirt bike,electric dirt bike"
+          QUERIES: "surron,talaria,e ride pro,79bike,rfn apollo,segway dirt bike,electric dirt bike,racing simulator,sim rig,atv,quad"
           LAT: "43.7615"
           LNG: "-79.4111"
           RADIUS_KM: "200"
@@ -49,7 +49,9 @@ jobs:
           # "e ride pro" and "rfn apollo" 0 — so the productive ones run every time and
           # the weak ones take the single rotating slot
           PRIORITY_QUERIES: "surron,talaria,electric dirt bike,79bike"
-          QUERIES_PER_RUN: "5"
+          # 6, not 5: the sim and quad hunts added four rotating queries, so two
+          # rotation slots keep each one coming round every couple of hours
+          QUERIES_PER_RUN: "6"
           PAGES_PER_QUERY: "1"
           DATE_LISTED: "all"
           NEW_HOURS: "48"

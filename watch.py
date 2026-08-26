@@ -87,7 +87,9 @@ QUERIES = tuned("queries", [
         # live runs they returned only sneakers, hockey cards and golf shafts. Those
         # brands stay in REQUIRE, so a real one still gets caught by the other queries.
         "surron,talaria,e ride pro,79bike,rfn apollo,segway dirt bike,"
-        "electric dirt bike",
+        "electric dirt bike,"
+        # the sim and quad hunts; QUERY_CATEGORY below gives these their own price band
+        "racing simulator,sim rig,atv,quad",
     ).split(",")
     if q.strip()
 ])
@@ -230,7 +232,7 @@ PRIORITY_QUERIES = [
 # Total queries per run, priority ones first and the remainder rotated in. Searching
 # every brand every hour costs credits for no benefit - new bikes in this class appear
 # a few times a week. 0 means run everything every time.
-QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "5"))   # 4 priority + 1 rotated
+QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "6"))   # 4 priority + 2 rotated
 
 # Send a listing if it is NEW or if it MENTIONS A TRADE. Never if it refuses trades -
 # that check runs first and wins outright. "New" is read from the detail call's
@@ -297,6 +299,51 @@ def apply_brands(queries, priority, require, exclude, rules=None):
 QUERIES, PRIORITY_QUERIES, REQUIRE, EXCLUDE = apply_brands(
     QUERIES, PRIORITY_QUERIES, REQUIRE, EXCLUDE
 )
+
+# ---- extra hunt categories ---------------------------------------------------
+# Racing sim rigs and ATVs, same trade rules as the bikes (dealers out, refusals
+# out, trade-wanters first). Each category owns its lists and price band because
+# the bike lists actively contradict them: the bike blocklist bans gas engines and
+# Japanese makes, which describes nearly every real ATV on the market.
+SIM_REQUIRE = [
+    # rig words, then rig brands. A full setup (seat, wheel, pedals, shifter) can't
+    # be proven from a title; the CA$4k floor is what filters out lone wheels and
+    # pedal sets, which top out well under it.
+    "racing simulator,sim rig,simulator rig,sim racing,racing cockpit,sim cockpit,"
+    "simucube,fanatec,simagic,moza racing,trak racer,next level racing,sim lab,"
+    "playseat,gt omega"
+][0].split(",")
+SIM_EXCLUDE = "wheel only,base only,pedals only,seat only,monitor only,for parts".split(",")
+
+ATV_REQUIRE = [
+    # generic words plus models whose names don't collide with anything else.
+    # Bare "outlander" is out - it matches the Mitsubishi SUV.
+    "atv,quad,four wheeler,4 wheeler,fourwheeler,raptor 700,yfz,banshee,"
+    "grizzly,kingquad,king quad,brute force,sportsman 570,sportsman 850,"
+    "outlander 570,outlander 650,outlander 850,outlander 1000,renegade 850"
+][0].split(",")
+ATV_EXCLUDE = (
+    # "quad" also matches quadcopters - a DJI Inspire sits right in this price band
+    "copter,drone,dji,"
+    "for parts,parts only,trailer,plow,winch,tires,rims,helmet,cover,"
+    "kids,child,50cc,70cc,90cc,110cc,125cc"
+).split(",")
+
+CATEGORIES = {
+    # checked in this order, so a title naming a bike and a quad files as a bike
+    "dirtbike": {"require": REQUIRE, "exclude": EXCLUDE,
+                 "min_price": MIN_PRICE, "max_price": MAX_PRICE},
+    "sim":      {"require": SIM_REQUIRE, "exclude": SIM_EXCLUDE,
+                 "min_price": tuned_num("sim_min_price", 4000.0),
+                 "max_price": tuned_num("sim_max_price", 10000.0)},
+    "atv":      {"require": ATV_REQUIRE, "exclude": ATV_EXCLUDE,
+                 "min_price": tuned_num("atv_min_price", 4000.0),
+                 "max_price": tuned_num("atv_max_price", 10000.0)},
+}
+
+# Which category's price band a search query carries. Unlisted queries are bikes.
+QUERY_CATEGORY = {"racing simulator": "sim", "sim rig": "sim",
+                  "atv": "atv", "quad": "atv"}
 
 
 def call(url, params, tries=3):
@@ -380,13 +427,14 @@ def search():
     for query in queries:
         cursor, pages, got = None, 0, 0
         while pages < max(1, PAGES_PER_QUERY):
+            qcat = CATEGORIES[QUERY_CATEGORY.get(query, "dirtbike")]
             params = {
                 "query": query,
                 "lat": LAT,
                 "lng": LNG,
                 "radius_km": RADIUS_KM,
-                "max_price": MAX_PRICE,
-                "min_price": MIN_PRICE,
+                "max_price": qcat["max_price"],
+                "min_price": qcat["min_price"],
                 "sort_by": "creation_time_descend",
                 "date_listed": DATE_LISTED,
                 "availability": "available",
@@ -430,21 +478,29 @@ def detail(listing_id):
         return {}
 
 
-def rejected(title):
-    """Why this title is out, or None to keep it.
+def categorize(title):
+    """(category name, None) for a title some category wants, else (None, why).
 
     Title only, deliberately. Real listings mention "battery" and "tire" in their
-    descriptions constantly, so judging on description would drop genuine bikes.
+    descriptions constantly, so judging on description would drop genuine items.
+    Categories are tried in declaration order, bikes first.
     """
     blob = (title or "").lower()
-    hit = next((w for w in EXCLUDE if w in blob), None)
-    if hit:
-        # not just parts any more - gas bikes, scooters, street bikes and ruled-out
-        # makes all live in EXCLUDE, so the label stays neutral
-        return f"excluded:{hit}"
-    if not any(w in blob for w in REQUIRE):
-        return "not a known model"
-    return None
+    why = None
+    for name, cat in CATEGORIES.items():
+        if not any(w in blob for w in cat["require"]):
+            continue
+        hit = next((w for w in cat["exclude"] if w in blob), None)
+        if hit:
+            why = f"excluded:{hit}"
+            continue
+        return name, None
+    return None, why or "not a known model"
+
+
+def rejected(title):
+    """Why this title is out, or None to keep it."""
+    return categorize(title)[1]
 
 
 def price_of(listing):
@@ -595,7 +651,7 @@ def shortlist(fresh):
     queue, skips = [], []
     for listing in fresh:
         title = listing.get("title")
-        nope = rejected(title)
+        name, nope = categorize(title)
         if nope:
             skips.append((listing, nope))
             continue
@@ -607,10 +663,16 @@ def shortlist(fresh):
         if shop:
             skips.append((listing, f"dealer:{shop}"))
             continue
+        # Price bands are per category: a CA$3k Surron is real, a CA$3k "sim rig"
+        # is a lone wheel, and a CA$14k quad from a bike-band search is out of range.
+        # Price is in the search result, so both checks cost nothing.
+        cat = CATEGORIES[name]
         price = price_of(listing)
-        if price is not None and price < MIN_PRICE:
-            # Price is in the search result, so this costs nothing.
-            skips.append((listing, f"under {MIN_PRICE:g} (CA${price:g})"))
+        if price is not None and price < cat["min_price"]:
+            skips.append((listing, f"under {cat['min_price']:g} (CA${price:g})"))
+            continue
+        if price is not None and price > cat["max_price"]:
+            skips.append((listing, f"over {cat['max_price']:g} (CA${price:g})"))
             continue
         queue.append((verdict != "yes", listing))   # False sorts first
     queue.sort(key=lambda q: q[0])
@@ -971,6 +1033,8 @@ def show():
     print(f"searching   : {', '.join(QUERIES)}")
     print(f"always      : {', '.join(PRIORITY_QUERIES)}  ({QUERIES_PER_RUN}/run)")
     print(f"price       : CA${MIN_PRICE:g} - CA${MAX_PRICE:g}")
+    print("categories  : " + ", ".join(
+        f"{n} CA${c['min_price']:g}-{c['max_price']:g}" for n, c in CATEGORIES.items()))
     print(f"radius      : {RADIUS_KM:g} km")
     print(f"new within  : {NEW_HOURS:g} h")
     print(f"per run     : {MAX_CHECKS} checks, {MAX_ALERTS} alerts")
@@ -1061,9 +1125,13 @@ def selftest():
     assert rejected("79Bike Falcon GT - Demonstration Model NEW") is None
     assert rejected("Surron LBX (2 batteries)") is None          # "batteries" != "battery only"
     assert rejected("2025 Fujikura Ventus FW 6-S Shaft") == "excluded:shaft"
-    assert rejected("Brand New Tommy Hilfiger Crewneck Sweater") == "excluded:sweater"
+    # exclusion labels now only fire when an allowlist term also hit - that's what
+    # lets gas be fatal for a bike but fine for a quad. A title matching no category
+    # at all is "not a known model" whatever junk words it contains; same skip, and
+    # still decided free from the title.
+    assert rejected("Brand New Tommy Hilfiger Crewneck Sweater") == "not a known model"
     assert rejected("Used book - a novel") == "not a known model"
-    assert rejected("100% altis helmet kids") == "excluded:helmet"
+    assert rejected("100% altis helmet kids") == "not a known model"
     assert rejected("Key switch for surron and mx3") == "excluded:key switch"
     assert rejected("Talaria and surron parts") == "excluded:parts"
     assert rejected("Jetson ebike") == "not a known model"       # commuter e-bike, not wanted
@@ -1073,12 +1141,12 @@ def selftest():
     # dropped from the allowlist on purpose: fat-tire commuters and cheap imports
     assert rejected("HeyBike Villain TRADE") == "not a known model"
     assert rejected(None) == "not a known model"
-    # yozma is blocked by make now, so these are rejected on the name rather than for
-    # failing the allowlist - they were reaching the queue via generic "electric dirt
-    # bike" phrasing, which the allowlist alone lets through
-    assert rejected("Dirt Bikes Available Yozma heybike jasion") == "excluded:yozma"
-    assert rejected("Yozma IN 10 Pro Off-Road Electric Dirt Bike") == "excluded:yozma"
-    assert rejected("Black yozma in10 (SEND OFFERS OR TRADES)") == "excluded:yozma"
+    # yozma used to reach the queue via generic "electric dirt bike" phrasing; since
+    # that phrasing left the allowlist these fail the model check outright. "yozma"
+    # stays in EXCLUDE as a belt against the make ever re-entering via a real term.
+    assert rejected("Dirt Bikes Available Yozma heybike jasion") == "not a known model"
+    assert rejected("Yozma IN 10 Pro Off-Road Electric Dirt Bike") == "not a known model"
+    assert rejected("Black yozma in10 (SEND OFFERS OR TRADES)") == "not a known model"
 
     # negatives must beat positives: these all contain the word "trade"
     assert trade_signal("Ebike NO TRADES")[0] == "no"
@@ -1211,6 +1279,26 @@ def selftest():
     for named in ("Surron Light Bee X", "2024 Talaria Sting", "79Bike Falcon",
                   "RFN Ares 8kw", "E Ride Pro S3"):
         assert rejected(named) is None, named
+
+    # sims and quads are their own categories with their own lists: gas and Yamaha
+    # are fatal for a bike but fine for a quad, and a quadcopter is neither
+    assert categorize("Fanatec DD2 full racing simulator rig")[0] == "sim"
+    assert categorize("2019 Yamaha Raptor 700R quad")[0] == "atv"
+    assert categorize("Surron Light Bee X")[0] == "dirtbike"
+    assert rejected("DJI Inspire 2 quadcopter") == "excluded:copter"
+    assert rejected("ATV trailer, like new") == "excluded:trailer"
+    assert categorize("Mitsubishi Outlander 2018")[0] is None   # SUV, not a quad
+    # per-category price bands, checked free off the search result
+    bq, bs = shortlist([
+        {"id": "s1", "title": "Playseat racing simulator rig", "price": {"amount": 900}},
+        {"id": "a1", "title": "Can-Am Outlander 850 ATV", "price": {"amount": 6500}},
+        {"id": "a2", "title": "Yamaha Grizzly 700 quad", "price": {"amount": 14000}},
+    ])
+    assert [l["id"] for l in bq] == ["a1"], bq
+    assert bs[0][1].startswith("under 4000") and bs[1][1].startswith("over 10000"), bs
+    # and the search itself carries the right band per query
+    assert QUERY_CATEGORY.get("atv") == "atv" and QUERY_CATEGORY.get("surron") is None
+    assert CATEGORIES["atv"]["min_price"] == 4000 and CATEGORIES["sim"]["max_price"] == 10000
 
     # every card is exactly 3 lines, states trade status, and carries no pitch text
     hot = card(
