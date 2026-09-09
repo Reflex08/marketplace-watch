@@ -239,6 +239,11 @@ QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "6"))   # 4 priority + 2
 # creation_time, which we are paying for anyway to apply the refusal rule.
 NEW_HOURS = float(os.environ.get("NEW_HOURS", "48"))
 
+# 1 = alert ONLY on sellers who signal a trade; being new no longer qualifies on its
+# own. 0 restores the old OR rule (new OR wants-trade). Flippable from Telegram
+# ("send me new posts too" -> set_trades_only 0).
+TRADES_ONLY = int(os.environ.get("TRADES_ONLY", "1"))
+
 # Descriptions read per run, 1 credit each. This is the real spend knob: trade intent
 # only lives in the description, so a listing has to be read to be judged. Separate
 # from MAX_ALERTS because under TRADE_ONLY most reads end in a discard.
@@ -263,6 +268,7 @@ DEALER = tuned("dealer", DEALER)
 TRADE_OK = tuned("trade_ok", TRADE_OK)
 PRIORITY_QUERIES = tuned("priority_queries", PRIORITY_QUERIES)
 NEW_HOURS = tuned_num("new_hours", NEW_HOURS)
+TRADES_ONLY = tuned_num("trades_only", TRADES_ONLY)
 MAX_CHECKS = tuned_num("max_checks", MAX_CHECKS)
 MAX_ALERTS = tuned_num("max_alerts", MAX_ALERTS)
 QUERIES_PER_RUN = tuned_num("queries_per_run", QUERIES_PER_RUN)
@@ -522,6 +528,19 @@ def dealer_signal(*texts):
 # hand-written list would, e.g. "will take trades for Seadoos, Spark, Trixxs".
 TRADE_WORD = re.compile(r"\b(trade|trades|traded|trading|swap|swaps|swapping)\b")
 
+# A seller who will only trade within the same class is a refusal FOR US - the offer
+# on our side is a go-kart. Catches "trade for another surron", "will only trade for
+# ebikes", "swap for talaria or e-moto". Checked after NO_TRADE, before the positive
+# lists, so stating a same-class target beats a generic "open to trades" elsewhere in
+# the text. Known ceiling: "trade for a surron or a seadoo" also lists a non-bike
+# target but still dies here; loosen by widening TRADE_OK phrasing if it ever matters.
+SAME_CLASS = re.compile(
+    r"\b(?:trade[sd]?|trading|swap(?:s|ping)?)\s+(?:only\s+)?for\s+"
+    r"(?:(?:an?other|a|an|other)\s+)?"
+    r"(?:sur-?rons?|talarias?|e-?bikes?|ebikes?|e-?motos?|emotos?|"
+    r"electric\s+(?:dirt\s+)?bikes?|dirt\s?bikes?)"
+)
+
 
 def trade_signal(*texts):
     """('no'|'yes'|None, matched phrase) - read from title AND description.
@@ -533,6 +552,9 @@ def trade_signal(*texts):
     for phrase in NO_TRADE:
         if phrase in blob:
             return "no", phrase
+    m = SAME_CLASS.search(blob)
+    if m:
+        return "no", m.group(0)
     for phrase in TRADE_OK:          # specific phrases first, they read better in the alert
         if phrase in blob:
             return "yes", phrase
@@ -699,6 +721,11 @@ def triage(listings, get_detail=None):
         age = age_hours(info)
         fresh = age is not None and age <= NEW_HOURS
         wants = verdict == "yes"
+        if TRADES_ONLY and not wants:
+            # Trade-wanters only: new alone no longer qualifies. The label stays a
+            # soft skip, so a seller who later edits in "open to trades" resurfaces.
+            skips.append((listing, "no trade mention"))
+            continue
         if not (fresh or wants):
             # Read, judged, discarded - but recorded, so the credit is never respent.
             aged = "age unknown" if age is None else f"{age / 24:.0f}d old"
@@ -783,6 +810,7 @@ RULE_TOOL = {
                     "set_radius_km",
                     "set_new_hours",
                     "set_max_alerts",
+                    "set_trades_only",  # 1 = only trade-wanters, 0 = new posts too
                     "none",
                 ],
             },
@@ -889,6 +917,7 @@ def apply_rule(rule):
         "set_radius_km": "radius_km",
         "set_new_hours": "new_hours",
         "set_max_alerts": "max_alerts",
+        "set_trades_only": "trades_only",
     }
 
     # Refuse any blocking rule whose text collides with a brand we are hunting.
@@ -1153,9 +1182,22 @@ def selftest():
     assert trade_signal("nice ebike", "not trading, cash only")[0] == "no"
     assert trade_signal("36V e-bike CASH ONLY (willing to negotiate)")[0] == "no"
     assert trade_signal("ACCEPTING TRADES 48V 500W ebike") == ("yes", "accepting trades")
-    assert trade_signal("ebike", "open to trades for a dirt bike")[0] == "yes"
+    # flipped by the same-class rule: this seller's stated target is a bike, and
+    # the offer on our side is a go-kart
+    assert trade_signal("ebike", "open to trades for a dirt bike")[0] == "no"
     assert trade_signal("plain ebike", "good condition") == (None, None)
     assert trade_signal(None, None) == (None, None)
+
+    # same-class-only traders are refusals FOR US - the offer is a go-kart, so a
+    # seller who will only swap within the bike world is a dead end
+    assert trade_signal("Surron LBX", "will only trade for another surron")[0] == "no"
+    assert trade_signal("Talaria", "trade for ebike or e-moto")[0] == "no"
+    assert trade_signal("Sur-ron", "swap for talaria")[0] == "no"
+    assert trade_signal("Light Bee", "only trade for other e-bikes")[0] == "no"
+    # but naming a NON-bike target, or just being open, stays a yes
+    assert trade_signal("bike", "will take trades for Seadoos, Spark")[0] == "yes"
+    assert trade_signal("bike", "open to trades, prefer a go kart or quad")[0] == "yes"
+    assert trade_signal("bike", "will trade for a quad")[0] == "yes"
 
     # phrasings no hand-written list would cover - the real listing that exposed this
     # said "will take trades for Seadoos, Spark, Trixxs", and "trades for" is not a
@@ -1213,8 +1255,9 @@ def selftest():
     assert age_hours({"creation_time": "garbage", "listing_date_text": "Listed 1 day ago"}) == 24.0
     assert age_hours({}) is None
 
-    # the OR rule: new alone qualifies, trade alone qualifies, neither does not,
-    # and a refusal beats both
+    # the legacy OR rule (trades_only off): new alone qualifies, trade alone
+    # qualifies, neither does not, and a refusal beats both
+    globals()["TRADES_ONLY"] = 0
     recent = (datetime.datetime.now(datetime.timezone.utc)
               - datetime.timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     bikes = [
@@ -1241,6 +1284,16 @@ def selftest():
     assert set(dropped) == {"stale", "refuse"}, dropped
     assert dropped["refuse"].startswith("refuses:")      # hard rule, regardless of being new
     assert "not new" in dropped["stale"]
+
+    # trades only - the live default: being new no longer qualifies on its own,
+    # and the skip stays soft so an edited listing can resurface
+    globals()["TRADES_ONLY"] = 1
+    alerts, more = triage(bikes, get_detail=lambda i: details[i])
+    assert [a[2]["id"] for a in alerts] == ["both", "trade"], [a[2]["id"] for a in alerts]
+    dropped = {l["id"]: why for l, why in more}
+    assert set(dropped) == {"new", "stale", "refuse"}, dropped
+    assert dropped["new"] == "no trade mention" and dropped["new"] in SOFT_SKIPS
+    assert dropped["refuse"].startswith("refuses:")
 
     # dealers are dropped even when new AND offering trade-ins
     assert dealer_signal("Talaria X3", "Financing available, plus taxes") == "financing"
@@ -1539,10 +1592,12 @@ class _sandbox:
         SEEN.write_text("{}")
         SEND_DELAY, MAX_ALERTS = 0, self.max_alerts
         globals()["search"] = lambda: self.listings
-        # Recent, so these qualify as NEW and actually reach the send path.
+        # Trade-wanting and recent, so these qualify under TRADES_ONLY as well as
+        # under the old OR rule - these tests exercise queue mechanics, not the rule.
         recent = (datetime.datetime.now(datetime.timezone.utc)
                   - datetime.timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-        globals()["detail"] = lambda _id: {"creation_time": recent}
+        globals()["detail"] = lambda _id: {"creation_time": recent,
+                                           "description": "open to trades"}
         globals()["notify"] = self.notify_fn
         return self
 
