@@ -8,7 +8,8 @@
   ],
   "no_trade_add": [
     "obo",
-    "not looking to trade"
+    "not looking to trade",
+    "no trading"
   ],
   "radius_km": 200.0
 }
