@@ -4,4 +4,5 @@
 *.service       text eol=lf
 *.timer         text eol=lf
 watch.py        text eol=lf
+wheels_watch.py text eol=lf
 *.yml           text eol=lf

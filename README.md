@@ -168,3 +168,28 @@ Meta's spam policy names "repetitive or unsolicited contact". Identical text at 
 across many one-sided threads is the exact signature — soft block within a day or two, permanent
 ban on repeat. Sellers also filter obvious bot copy-paste. Hand-sending from a ping converts better
 and costs you ten seconds.
+
+## wheels_watch.py — separate hunt, separate purpose
+
+Watches for aftermarket wheel sets (BMW, Mercedes, Audi, Vossen, Niche, HRE, Rotiform, BBS and
+similar) and alerts only on the ones judged a good deal. No trade logic, no dealer rule — buying
+outright, not trading a go-kart. Shares this repo's ScrapeCreators, Telegram and Anthropic
+credentials and runs on its own schedule (`.github/workflows/wheels.yml`, every 3 hours), because
+unlike `watch.py` it spends an Anthropic call per survivor rather than pure regex, so it stays on
+a slower cadence to control token spend.
+
+Same two-stage funnel: a free title/price pass (`CA$300–6,000` by default, brand or wheel word
+required in the title) narrows the field before a paid description read, and only the survivors
+that read `GOOD_DEAL` from the model reach Telegram — `fair`/`overpriced`/`unclear` verdicts are
+recorded in `wheels_seen.json` and never sent. State is separate from the bike watcher's
+`seen.json`, so the two never interfere.
+
+```sh
+SCRAPECREATORS_KEY=... TG_TOKEN=... TG_CHAT=... ANTHROPIC_API_KEY=... python wheels_watch.py
+python wheels_watch.py --selftest    # logic check, no network, no credits
+```
+
+Tuning knobs, all env vars: `WHEELS_QUERIES`, `WHEELS_QUERIES_PER_RUN`, `WHEELS_MIN_PRICE`,
+`WHEELS_MAX_PRICE`, `WHEELS_MAX_CHECKS`, `WHEELS_MAX_ALERTS`, `DEAL_MODEL` (defaults to Haiku —
+cheaper than Sonnet, and a deal/no-deal call doesn't need Sonnet's judgment). No Telegram
+reply-tuning yet; change these in the workflow file.

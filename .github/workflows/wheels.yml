@@ -1,0 +1,43 @@
+name: wheels-watch
+
+on:
+  schedule:
+    # Every 3 hours, not hourly: this hunt spends real Anthropic tokens per
+    # survivor (deal judgment), not just ScrapeCreators credits like watch.yml.
+    # Offset from :00 - that's the most contended minute on GitHub's scheduler
+    # and watch.yml already runs there, so this avoids queuing behind it too.
+    - cron: "20 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wheels-watch
+  cancel-in-progress: false
+
+jobs:
+  wheels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: SCRAPECREATORS_KEY=test python wheels_watch.py --selftest
+      - run: python wheels_watch.py
+        env:
+          SCRAPECREATORS_KEY: ${{ secrets.SCRAPECREATORS_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: persist state
+        if: always()
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add wheels_seen.json
+          git diff --quiet --cached || git commit -m "wheels seen state"
+          git pull --rebase --autostash
+          git push
