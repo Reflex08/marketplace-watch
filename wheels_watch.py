@@ -12,6 +12,7 @@ rather than a wide net.
 import html
 import json
 import os
+import pathlib
 import sys
 
 import requests
@@ -226,10 +227,15 @@ def main():
             desc = info.get("description")
             price = price_of(listing) or 0
             verdict, reason = judge_deal(listing.get("title"), price, desc)
-            if verdict == "good_deal" and sent < MAX_ALERTS:
-                notify(card(listing, verdict, reason))
-                seen[lid] = "sent"
-                sent += 1
+            if verdict == "good_deal":
+                if sent < MAX_ALERTS:
+                    notify(card(listing, verdict, reason))
+                    seen[lid] = "sent"
+                    sent += 1
+                # else: a genuine deal that just missed the cap. Left OUT of seen
+                # on purpose - marking it "good_deal" here would bury it forever
+                # next to real rejects. Leaving it unseen means next run re-reads
+                # and re-judges it (one more paid call), but it still reaches you.
             else:
                 seen[lid] = verdict
     finally:
@@ -275,7 +281,42 @@ def selftest():
     rendered = fake_card()
     assert rendered.count("\n") == 2 and "GOOD DEAL" in rendered, rendered
 
+    cap_spillover_check()
     print("ok")
+
+
+def cap_spillover_check():
+    """A good_deal beyond MAX_ALERTS must NOT be marked seen - it has to survive
+    to the next run, not vanish next to real rejects. Regression test for a bug
+    caught on the first live run: 5 good_deal verdicts, cap 4, and the 5th got
+    permanently buried before this fix."""
+    import tempfile
+
+    global SEEN, MAX_ALERTS, MAX_CHECKS
+    keep_seen, keep_alerts, keep_checks = SEEN, MAX_ALERTS, MAX_CHECKS
+    keep_search, keep_detail, keep_judge, keep_notify = (
+        globals()["search"], globals()["detail"],
+        globals()["judge_deal"], globals()["notify"],
+    )
+    try:
+        SEEN = pathlib.Path(tempfile.mkdtemp()) / "wheels_seen.json"
+        MAX_ALERTS, MAX_CHECKS = 1, 5
+        listings = [{"id": str(i), "title": f"Vossen wheels {i}",
+                     "price": {"amount": 1000}} for i in range(3)]
+        globals()["search"] = lambda: listings
+        globals()["detail"] = lambda _id: {"description": "great condition"}
+        globals()["judge_deal"] = lambda *a: ("good_deal", "under market")
+        globals()["notify"] = lambda text, tries=4: None
+        main()
+        seen = json.loads(SEEN.read_text())
+        assert sum(1 for v in seen.values() if v == "sent") == 1, seen
+        # the spillover ids must be ABSENT, not recorded as "good_deal"
+        assert "good_deal" not in seen.values(), seen
+        assert len(seen) == 1, seen   # only the sent one is recorded at all
+    finally:
+        SEEN, MAX_ALERTS, MAX_CHECKS = keep_seen, keep_alerts, keep_checks
+        globals()["search"], globals()["detail"] = keep_search, keep_detail
+        globals()["judge_deal"], globals()["notify"] = keep_judge, keep_notify
 
 
 if __name__ == "__main__":
